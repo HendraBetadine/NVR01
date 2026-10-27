@@ -5,35 +5,58 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>STB NVR</title>
 <style>
-  :root { --bg:#111418; --panel:#1a1f26; --line:#2a313b; --text:#e6e9ee; --mute:#8a94a3;
-          --acc:#4fb3ff; --ok:#3ecf8e; --bad:#ff6b6b; }
+  :root { --bg:#111418; --panel:#1a1f26; --panel2:#232a33; --line:#2a313b; --text:#e6e9ee; --mute:#8a94a3;
+          --acc:#4fb3ff; --ok:#3ecf8e; --bad:#ff6b6b; --warn:#f5b54a; }
   * { box-sizing:border-box; }
   body { margin:0; background:var(--bg); color:var(--text);
          font:15px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
-  header { display:flex; flex-wrap:wrap; gap:10px; align-items:center; justify-content:space-between;
-           padding:14px 16px; border-bottom:1px solid var(--line); background:var(--panel); }
-  h1 { margin:0; font-size:18px; letter-spacing:.3px; }
-  #cams { display:flex; flex-wrap:wrap; gap:6px; }
-  .pill { padding:3px 10px; border-radius:99px; background:#232a33; font-size:13px; color:var(--mute); }
+  header { display:flex; flex-wrap:wrap; gap:10px 16px; align-items:center;
+           padding:12px 16px; border-bottom:1px solid var(--line); background:var(--panel); }
+  h1 { margin:0; font-size:18px; }
+  nav { display:flex; gap:4px; }
+  nav button { background:none; border:none; color:var(--mute); padding:8px 12px; border-radius:8px; }
+  nav button.on { background:var(--panel2); color:var(--text); }
+  #cams { display:flex; flex-wrap:wrap; gap:6px; margin-left:auto; }
+  .pill { padding:3px 10px; border-radius:99px; background:var(--panel2); font-size:13px; color:var(--mute); }
   .pill.ok { color:var(--ok); } .pill.bad { color:var(--bad); }
-  main { max-width:1000px; margin:0 auto; padding:16px; }
+  main { max-width:1100px; margin:0 auto; padding:16px; }
+  section { display:none; } section.on { display:block; }
   .bar { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-bottom:12px; }
-  select, button { font:inherit; color:var(--text); background:#232a33; border:1px solid var(--line);
-                   border-radius:8px; padding:8px 12px; cursor:pointer; }
-  button:hover, select:hover { border-color:var(--acc); }
+  select, button, input, textarea { font:inherit; color:var(--text); background:var(--panel2);
+        border:1px solid var(--line); border-radius:8px; padding:8px 12px; }
+  button { cursor:pointer; } button:hover, select:hover { border-color:var(--acc); }
   button.primary { background:var(--acc); border-color:var(--acc); color:#06121c; font-weight:600; }
+  button.danger { color:var(--bad); }
+  button:disabled { opacity:.5; cursor:default; }
+  .mute { color:var(--mute); font-size:13px; }
+
+  /* ---- Playback ---- */
+  .player { background:#000; border-radius:10px; overflow:hidden; position:relative; aspect-ratio:16/9; }
+  .player video { width:100%; height:100%; display:block; }
+  .player .msg { position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+                 color:var(--mute); text-align:center; padding:20px; pointer-events:none; }
+  .now { display:flex; flex-wrap:wrap; gap:8px; justify-content:space-between; align-items:center; margin:10px 0; }
+  .timeline { position:relative; height:46px; background:var(--panel); border:1px solid var(--line);
+              border-radius:8px; cursor:pointer; margin-top:6px; }
+  .timeline .seg { position:absolute; top:8px; bottom:16px; background:#2f6f98; }
+  .timeline .seg.live { background:var(--ok); }
+  .timeline .cur { position:absolute; top:2px; bottom:2px; width:2px; background:var(--warn); display:none; }
+  .timeline .hours { position:absolute; left:0; right:0; bottom:1px; height:14px; font-size:10px; color:var(--mute); }
+  .timeline .hours span { position:absolute; transform:translateX(-50%); }
+  .chips { display:flex; flex-wrap:wrap; gap:6px; margin-top:12px; max-height:220px; overflow:auto; }
+  .chip { padding:4px 10px; font-size:13px; }
+  .chip.on { border-color:var(--warn); color:var(--warn); }
+
+  /* ---- File ---- */
   #crumbs { flex:1; min-width:200px; color:var(--mute); overflow-wrap:anywhere; }
   #crumbs a { color:var(--acc); text-decoration:none; cursor:pointer; }
-  #free { color:var(--mute); font-size:13px; }
   table { width:100%; border-collapse:collapse; background:var(--panel); border-radius:10px; overflow:hidden; }
   th, td { padding:9px 12px; border-bottom:1px solid var(--line); text-align:left; }
   th { color:var(--mute); font-weight:500; font-size:13px; }
   td.n { overflow-wrap:anywhere; }
   td.s, td.t { color:var(--mute); white-space:nowrap; font-size:13px; }
-  td a { color:var(--text); text-decoration:none; }
-  td a.dir { color:var(--acc); font-weight:600; }
-  .x { background:none; border:none; color:var(--mute); padding:4px 8px; }
-  .x:hover { color:var(--bad); }
+  td a { color:var(--text); text-decoration:none; } td a.dir { color:var(--acc); font-weight:600; cursor:pointer; }
+  .x { background:none; border:none; color:var(--mute); padding:4px 8px; } .x:hover { color:var(--bad); }
   #queue { margin-bottom:12px; display:grid; gap:6px; }
   .up { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:8px 12px; font-size:13px; }
   .up .row { display:flex; justify-content:space-between; gap:8px; }
@@ -41,38 +64,137 @@
   #drop { position:fixed; inset:0; background:rgba(79,179,255,.15); border:3px dashed var(--acc);
           display:none; align-items:center; justify-content:center; font-size:22px; z-index:9; }
   .empty { padding:24px; text-align:center; color:var(--mute); }
-  @media (max-width:600px) { td.t, th.t { display:none; } }
+
+  /* ---- Pengaturan ---- */
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:16px; margin-bottom:14px; }
+  .card h2 { margin:0 0 12px; font-size:16px; }
+  label.f { display:block; margin-bottom:12px; }
+  label.f > span { display:block; color:var(--mute); font-size:13px; margin-bottom:4px; }
+  label.f input, label.f textarea, label.f select { width:100%; }
+  textarea { min-height:120px; font-family:ui-monospace,Menlo,Consolas,monospace; font-size:13px; }
+  .grid3 { display:grid; grid-template-columns:repeat(3,1fr); gap:12px; }
+  .check { display:flex; gap:8px; align-items:center; margin-bottom:12px; }
+  .check input { width:auto; }
+  .recstate { font-weight:600; }
+  #toast { position:fixed; left:50%; bottom:20px; transform:translateX(-50%); background:var(--panel2);
+           border:1px solid var(--line); padding:10px 16px; border-radius:8px; display:none; z-index:10; }
+  @media (max-width:640px) { td.t, th.t { display:none; } .grid3 { grid-template-columns:1fr; } #cams { margin-left:0; } }
 </style>
 </head>
 <body>
 <header>
   <h1>📹 STB NVR</h1>
+  <nav>
+    <button data-tab="play" class="on">▶ Playback</button>
+    <button data-tab="files">📁 File</button>
+    <button data-tab="cfg">⚙ Pengaturan</button>
+  </nav>
   <div id="cams"><span class="pill">memuat…</span></div>
 </header>
+
 <main>
-  <div class="bar">
-    <select id="root" title="Lokasi"></select>
-    <div id="crumbs"></div>
-    <span id="free"></span>
-  </div>
-  <div class="bar">
-    <button class="primary" id="btnUp">⬆ Upload file</button>
-    <button id="btnDir">＋ Folder baru</button>
-    <button id="btnRef">⟳ Muat ulang</button>
-    <input type="file" id="file" multiple hidden>
-  </div>
-  <div id="queue"></div>
-  <table>
-    <thead><tr><th>Nama</th><th>Ukuran</th><th class="t">Diubah</th><th></th></tr></thead>
-    <tbody id="list"></tbody>
-  </table>
+  <!-- ================= PLAYBACK ================= -->
+  <section id="play" class="on">
+    <div class="bar">
+      <select id="pCam" title="Kamera"></select>
+      <select id="pDay" title="Tanggal"></select>
+      <label class="mute"><input type="checkbox" id="pAudio"> audio</label>
+      <button id="pRef">⟳</button>
+    </div>
+    <div class="player">
+      <video id="video" controls playsinline preload="metadata"></video>
+      <div class="msg" id="pMsg">Pilih kamera & tanggal, lalu klik timeline atau jam rekaman.</div>
+    </div>
+    <div class="now">
+      <div><b id="pTitle">—</b> <span class="mute" id="pInfo"></span></div>
+      <div class="bar" style="margin:0">
+        <button id="pPrev">⏮ Sebelumnya</button>
+        <button id="pNext">Berikutnya ⏭</button>
+        <a id="pDl" class="mute" href="#" style="display:none">⬇ Download asli</a>
+      </div>
+    </div>
+    <div class="timeline" id="tl" title="Klik untuk lompat ke jam tersebut">
+      <div class="cur" id="tlCur"></div>
+      <div class="hours" id="tlHours"></div>
+    </div>
+    <div class="chips" id="chips"></div>
+  </section>
+
+  <!-- ================= FILE ================= -->
+  <section id="files">
+    <div class="bar">
+      <select id="root" title="Lokasi"></select>
+      <div id="crumbs"></div>
+      <span id="free" class="mute"></span>
+    </div>
+    <div class="bar">
+      <button class="primary" id="btnUp">⬆ Upload file</button>
+      <button id="btnDir">＋ Folder baru</button>
+      <button id="btnRef">⟳ Muat ulang</button>
+      <input type="file" id="file" multiple hidden>
+    </div>
+    <div id="queue"></div>
+    <table>
+      <thead><tr><th>Nama</th><th>Ukuran</th><th class="t">Diubah</th><th></th></tr></thead>
+      <tbody id="list"></tbody>
+    </table>
+  </section>
+
+  <!-- ================= PENGATURAN ================= -->
+  <section id="cfg">
+    <div class="card">
+      <h2>Perekaman: <span class="recstate" id="recState">—</span></h2>
+      <div class="bar" style="margin:0">
+        <button class="primary" id="recOn">▶ Mulai rekam</button>
+        <button class="danger" id="recOff">■ Stop rekam</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Kamera</h2>
+      <label class="f"><span>Satu kamera per baris — format: <code>nama,rtsp://user:pass@ip:554/stream</code></span>
+        <textarea id="cCams" spellcheck="false"
+          placeholder="depan,rtsp://admin:12345@192.168.1.64:554/Streaming/Channels/102"></textarea></label>
+      <div class="check"><input type="checkbox" id="cAudio"><label for="cAudio">Rekam audio (jika kamera punya)</label></div>
+    </div>
+
+    <div class="card">
+      <h2>Penyimpanan</h2>
+      <label class="f"><span>Folder rekaman (pakai HDD/flashdisk USB)</span>
+        <select id="cPathSel"></select></label>
+      <label class="f"><span>…atau ketik path manual</span><input id="cPath"></label>
+      <div class="grid3">
+        <label class="f"><span>Durasi per file (menit)</span><input id="cSeg" type="number" min="1"></label>
+        <label class="f"><span>Sisakan ruang kosong (GB)</span><input id="cMinFree" type="number" min="1"></label>
+        <label class="f"><span>Simpan maksimal (hari, 0 = sampai penuh)</span><input id="cDays" type="number" min="0"></label>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Web server</h2>
+      <div class="grid3">
+        <label class="f"><span>Port</span><input id="cPort" type="number" min="1024" max="65535"></label>
+        <label class="f"><span>Password (user: admin)</span><input id="cPass" type="text" autocomplete="off"></label>
+        <div class="check" style="margin-top:22px"><input type="checkbox" id="cWeb"><label for="cWeb">Web server aktif</label></div>
+      </div>
+      <div class="mute">Mengubah port/password akan memutus halaman ini — buka lagi dengan port/password baru.</div>
+    </div>
+
+    <div class="bar">
+      <button class="primary" id="cSave">💾 Simpan & terapkan</button>
+      <span class="mute">Menyimpan akan me-restart perekaman beberapa detik.</span>
+    </div>
+  </section>
 </main>
 <div id="drop">Lepaskan file untuk upload</div>
+<div id="toast"></div>
 
 <script>
 const $ = s => document.querySelector(s);
-let roots = [], root = '', path = '';
-
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const q = o => Object.entries(o).map(([k,v]) => k + '=' + encodeURIComponent(v)).join('&');
+const pad = n => String(n).padStart(2, '0');
+const hms = s => pad(Math.floor(s / 3600)) + ':' + pad(Math.floor(s % 3600 / 60)) + ':' + pad(Math.floor(s % 60));
 const fmtSize = b => {
   if (b < 1024) return b + ' B';
   const u = ['KB','MB','GB','TB']; let i = -1;
@@ -80,8 +202,10 @@ const fmtSize = b => {
   return b.toFixed(b < 10 ? 1 : 0) + ' ' + u[i];
 };
 const fmtDate = t => new Date(t).toLocaleString('id-ID', {dateStyle:'short', timeStyle:'short'});
-const q = o => Object.entries(o).map(([k,v]) => k + '=' + encodeURIComponent(v)).join('&');
-const esc = s => s.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const fmtDay = d => { const dt = new Date(+d.slice(0,4), +d.slice(4,6) - 1, +d.slice(6,8));
+  return dt.toLocaleDateString('id-ID', {weekday:'short', day:'numeric', month:'short', year:'numeric'}); };
+function toast(msg, ms = 3000) { const t = $('#toast'); t.textContent = msg; t.style.display = 'block';
+  clearTimeout(toast.h); toast.h = setTimeout(() => t.style.display = 'none', ms); }
 
 async function api(url, opt) {
   const r = await fetch(url, opt);
@@ -90,25 +214,126 @@ async function api(url, opt) {
   return j;
 }
 
-async function loadRoots() {
-  roots = await api('/api/roots');
-  const sel = $('#root');
-  sel.innerHTML = roots.map(r =>
-    `<option value="${esc(r.name)}">${esc(r.name)} — ${fmtSize(r.free)} kosong</option>`).join('');
-  const saved = location.hash.slice(1).split('|');
-  if (saved[0] && roots.some(r => r.name === decodeURIComponent(saved[0]))) {
-    root = decodeURIComponent(saved[0]); path = decodeURIComponent(saved[1] || '');
-  } else { root = roots.length ? roots[0].name : ''; path = ''; }
-  sel.value = root;
+// ---------------- Tabs ----------------
+const loaded = {};
+function showTab(id) {
+  document.querySelectorAll('nav button').forEach(b => b.classList.toggle('on', b.dataset.tab === id));
+  document.querySelectorAll('section').forEach(s => s.classList.toggle('on', s.id === id));
+  if (!loaded[id]) { loaded[id] = true; ({play: initPlay, files: initFiles, cfg: loadCfg})[id](); }
+  history.replaceState(null, '', '#' + id);
 }
+document.querySelectorAll('nav button').forEach(b => b.onclick = () => showTab(b.dataset.tab));
 
-async function load() {
-  location.hash = encodeURIComponent(root) + '|' + encodeURIComponent(path);
+// ======================= PLAYBACK =======================
+let camList = [], files = [], seg = 10, idx = -1, seekTo = 0;
+const video = $('#video');
+
+async function initPlay() {
+  camList = await api('/api/cams').catch(() => []);
+  const sel = $('#pCam');
+  if (!camList.length) {
+    sel.innerHTML = '<option>(belum ada rekaman)</option>';
+    $('#pDay').innerHTML = ''; drawTimeline(); return;
+  }
+  const prev = sel.value;
+  sel.innerHTML = camList.map(c => `<option>${esc(c.name)}</option>`).join('');
+  if (camList.some(c => c.name === prev)) sel.value = prev;
+  fillDays();
+}
+function fillDays() {
+  const c = camList.find(c => c.name === $('#pCam').value);
+  const prev = $('#pDay').value;
+  $('#pDay').innerHTML = (c ? c.days : []).map(d => `<option value="${d}">${fmtDay(d)}</option>`).join('');
+  if (c && c.days.includes(prev)) $('#pDay').value = prev;
+  loadDay();
+}
+async function loadDay() {
+  const cam = $('#pCam').value, day = $('#pDay').value;
+  files = []; idx = -1;
+  if (cam && day) {
+    const d = await api('/api/day?' + q({cam, day})).catch(e => { toast(e.message); return {files:[], seg}; });
+    files = d.files; seg = d.seg;
+  }
+  drawTimeline();
+}
+function drawTimeline() {
+  const tl = $('#tl');
+  tl.querySelectorAll('.seg').forEach(e => e.remove());
+  files.forEach((f, i) => {
+    const el = document.createElement('div');
+    el.className = 'seg' + (f.live ? ' live' : '');
+    el.style.left = (f.sec / 864) + '%';
+    el.style.width = Math.max(seg * 60 / 864, 0.15) + '%';
+    el.title = hms(f.sec) + (f.live ? ' (sedang direkam)' : '');
+    tl.insertBefore(el, $('#tlCur'));
+  });
+  $('#tlHours').innerHTML = [0,3,6,9,12,15,18,21,24].map(h =>
+    `<span style="left:${h / 24 * 100}%">${pad(h)}</span>`).join('');
+  $('#chips').innerHTML = files.map((f, i) =>
+    `<button class="chip${i === idx ? ' on' : ''}" data-i="${i}">${hms(f.sec).slice(0,5)}${f.live ? ' ●' : ''}</button>`).join('')
+    || '<span class="mute">Tidak ada rekaman di tanggal ini.</span>';
+  updateCursor();
+}
+function playIndex(i, offset = 0) {
+  if (i < 0 || i >= files.length) return;
+  idx = i; seekTo = offset;
+  const f = files[i], cam = $('#pCam').value;
+  $('#pMsg').textContent = 'Menyiapkan video… (beberapa detik)'; $('#pMsg').style.display = 'flex';
+  video.src = '/play?' + q({cam, file:f.f, audio: $('#pAudio').checked ? 1 : 0, t: f.live ? Date.now() : 0});
+  video.play().catch(() => {});
+  $('#pTitle').textContent = cam + ' · ' + fmtDay($('#pDay').value) + ' ' + hms(f.sec);
+  $('#pInfo').textContent = fmtSize(f.s) + (f.live ? ' · masih direkam' : '');
+  $('#pDl').href = '/dl?' + q({root:'Rekaman', path: cam + '/' + f.f}); $('#pDl').style.display = '';
+  document.querySelectorAll('.chip').forEach(c => c.classList.toggle('on', +c.dataset.i === i));
+}
+function updateCursor() {
+  const c = $('#tlCur');
+  if (idx < 0 || !files[idx]) { c.style.display = 'none'; return; }
+  const s = files[idx].sec + (video.currentTime || 0);
+  c.style.display = 'block'; c.style.left = (s / 864) + '%';
+}
+video.addEventListener('loadedmetadata', () => { if (seekTo > 0 && seekTo < video.duration) video.currentTime = seekTo; seekTo = 0; });
+video.addEventListener('playing', () => $('#pMsg').style.display = 'none');
+video.addEventListener('canplay', () => $('#pMsg').style.display = 'none');
+video.addEventListener('timeupdate', updateCursor);
+video.addEventListener('ended', () => { if (idx + 1 < files.length) playIndex(idx + 1); });
+video.addEventListener('error', () => {
+  $('#pMsg').style.display = 'flex';
+  $('#pMsg').textContent = 'Video tidak bisa diputar di browser ini (mungkin codec H.265). Coba Chrome/Edge terbaru, atau pakai "Download asli" lalu buka di VLC.';
+});
+$('#tl').addEventListener('click', e => {
+  if (!files.length) return;
+  const r = $('#tl').getBoundingClientRect();
+  const sec = (e.clientX - r.left) / r.width * 86400;
+  let best = -1;
+  files.forEach((f, i) => { if (f.sec <= sec) best = i; });
+  if (best < 0) best = 0;
+  const off = Math.max(0, sec - files[best].sec);
+  playIndex(best, off < seg * 60 + 60 ? off : 0);
+});
+$('#chips').addEventListener('click', e => { const b = e.target.closest('[data-i]'); if (b) playIndex(+b.dataset.i); });
+$('#pPrev').onclick = () => playIndex(idx > 0 ? idx - 1 : 0);
+$('#pNext').onclick = () => playIndex(idx + 1);
+$('#pCam').onchange = fillDays;
+$('#pDay').onchange = loadDay;
+$('#pRef').onclick = initPlay;
+$('#pAudio').onchange = () => { if (idx >= 0) playIndex(idx, video.currentTime); };
+
+// ======================= FILE MANAGER =======================
+let roots = [], root = '', path = '';
+async function initFiles() {
+  roots = await api('/api/roots').catch(() => []);
+  $('#root').innerHTML = roots.map(r =>
+    `<option value="${esc(r.name)}">${esc(r.name)} — ${fmtSize(r.free)} kosong</option>`).join('');
+  if (!roots.some(r => r.name === root)) { root = roots.length ? roots[0].name : ''; path = ''; }
+  $('#root').value = root;
+  loadFiles();
+}
+async function loadFiles() {
   const crumbs = [`<a data-p="">${esc(root)}</a>`];
   let acc = '';
   path.split('/').filter(Boolean).forEach(seg => {
-    acc += (acc ? '/' : '') + seg;
-    crumbs.push(`<a data-p="${esc(acc)}">${esc(seg)}</a>`);
+    acc += (acc ? '/' : '') + seg; crumbs.push(`<a data-p="${esc(acc)}">${esc(seg)}</a>`);
   });
   $('#crumbs').innerHTML = crumbs.join(' / ');
   const tb = $('#list');
@@ -119,108 +344,139 @@ async function load() {
     if (path) rows.push(`<tr><td class="n" colspan="4"><a class="dir" data-p="${esc(path.split('/').slice(0,-1).join('/'))}">⬑ ..</a></td></tr>`);
     d.items.forEach(it => {
       const p = (path ? path + '/' : '') + it.n;
-      const name = it.d
-        ? `<a class="dir" data-p="${esc(p)}">📁 ${esc(it.n)}</a>`
-        : `<a href="/dl?${q({root, path:p})}">📄 ${esc(it.n)}</a>`;
+      const name = it.d ? `<a class="dir" data-p="${esc(p)}">📁 ${esc(it.n)}</a>`
+                        : `<a href="/dl?${q({root, path:p})}">📄 ${esc(it.n)}</a>`;
       rows.push(`<tr><td class="n">${name}</td><td class="s">${it.d ? '' : fmtSize(it.s)}</td>` +
         `<td class="t">${fmtDate(it.t)}</td><td><button class="x" data-del="${esc(p)}" title="Hapus">✕</button></td></tr>`);
     });
-    tb.innerHTML = rows.join('') || '<tr><td colspan="4" class="empty">Folder kosong</td></tr>';
-    if (!d.items.length && path) tb.innerHTML = rows[0] + '<tr><td colspan="4" class="empty">Folder kosong</td></tr>';
-  } catch (e) {
-    tb.innerHTML = `<tr><td colspan="4" class="empty">${esc(e.message)}</td></tr>`;
-  }
+    if (!d.items.length) rows.push('<tr><td colspan="4" class="empty">Folder kosong</td></tr>');
+    tb.innerHTML = rows.join('');
+  } catch (e) { tb.innerHTML = `<tr><td colspan="4" class="empty">${esc(e.message)}</td></tr>`; }
 }
-
 $('#list').addEventListener('click', async e => {
   const a = e.target.closest('[data-p]');
-  if (a) { path = a.dataset.p; load(); return; }
+  if (a) { path = a.dataset.p; loadFiles(); return; }
   const del = e.target.closest('[data-del]');
   if (del && confirm('Hapus "' + del.dataset.del + '"?')) {
-    try { await api('/api/delete?' + q({root, path:del.dataset.del}), {method:'POST'}); }
-    catch (err) { alert(err.message); }
-    load();
+    try { await api('/api/delete?' + q({root, path:del.dataset.del}), {method:'POST'}); } catch (err) { alert(err.message); }
+    loadFiles();
   }
 });
-$('#crumbs').addEventListener('click', e => {
-  const a = e.target.closest('[data-p]');
-  if (a) { path = a.dataset.p; load(); }
-});
-$('#root').addEventListener('change', e => { root = e.target.value; path = ''; load(); });
-$('#btnRef').onclick = () => { loadRoots().then(load); };
+$('#crumbs').addEventListener('click', e => { const a = e.target.closest('[data-p]'); if (a) { path = a.dataset.p; loadFiles(); } });
+$('#root').onchange = e => { root = e.target.value; path = ''; loadFiles(); };
+$('#btnRef').onclick = initFiles;
 $('#btnDir').onclick = async () => {
-  const name = prompt('Nama folder baru:');
-  if (!name) return;
+  const name = prompt('Nama folder baru:'); if (!name) return;
   try { await api('/api/mkdir?' + q({root, path, name}), {method:'POST'}); } catch (e) { alert(e.message); }
-  load();
+  loadFiles();
 };
 
-// ---- Upload: satu per satu, body = isi file (streaming, tanpa batas ukuran) ----
-const pending = [];
-let busy = false;
+// Upload: satu per satu, body = isi file (streaming, tanpa batas ukuran)
+const pending = []; let busy = false;
 $('#btnUp').onclick = () => $('#file').click();
 $('#file').onchange = e => { addFiles(e.target.files); e.target.value = ''; };
-
-function addFiles(files) {
-  for (const f of files) {
-    const el = document.createElement('div');
-    el.className = 'up';
+function addFiles(list) {
+  for (const f of list) {
+    const el = document.createElement('div'); el.className = 'up';
     el.innerHTML = `<div class="row"><span>${esc(f.name)}</span><span class="st">menunggu</span></div><progress max="100" value="0"></progress>`;
-    $('#queue').appendChild(el);
-    pending.push({f, el, root, path});
+    $('#queue').appendChild(el); pending.push({f, el, root, path});
   }
-  next();
+  nextUpload();
 }
-
-function next() {
+function nextUpload() {
   if (busy || !pending.length) return;
   busy = true;
   const {f, el, root: r, path: p} = pending.shift();
   const st = el.querySelector('.st'), pr = el.querySelector('progress');
-  const xhr = new XMLHttpRequest();
-  const t0 = Date.now();
+  const xhr = new XMLHttpRequest(), t0 = Date.now();
   xhr.open('PUT', '/api/upload?' + q({root:r, path:p, name:f.name}));
   xhr.upload.onprogress = ev => {
     if (!ev.lengthComputable) return;
     pr.value = ev.loaded / ev.total * 100;
-    const sec = (Date.now() - t0) / 1000;
-    st.textContent = Math.floor(pr.value) + '% · ' + fmtSize(ev.loaded / Math.max(sec, .1)) + '/s';
+    st.textContent = Math.floor(pr.value) + '% · ' + fmtSize(ev.loaded / Math.max((Date.now() - t0) / 1000, .1)) + '/s';
   };
+  const done = () => { busy = false; if (r === root && p === path) loadFiles(); nextUpload(); };
   xhr.onload = () => {
     let msg = 'selesai ✓';
     if (xhr.status !== 200) { try { msg = '✕ ' + JSON.parse(xhr.responseText).error; } catch { msg = '✕ HTTP ' + xhr.status; } }
-    st.textContent = msg;
-    if (xhr.status === 200) setTimeout(() => el.remove(), 4000);
-    done(r, p);
+    st.textContent = msg; if (xhr.status === 200) setTimeout(() => el.remove(), 4000); done();
   };
-  xhr.onerror = () => { st.textContent = '✕ koneksi terputus'; done(r, p); };
+  xhr.onerror = () => { st.textContent = '✕ koneksi terputus'; done(); };
   xhr.send(f);
 }
-function done(r, p) { busy = false; if (r === root && p === path) load(); next(); }
-
-// Drag & drop
 let dragDepth = 0;
-addEventListener('dragenter', e => { e.preventDefault(); dragDepth++; $('#drop').style.display = 'flex'; });
+const onFiles = () => $('#files').classList.contains('on');
+addEventListener('dragenter', e => { if (!onFiles()) return; e.preventDefault(); dragDepth++; $('#drop').style.display = 'flex'; });
 addEventListener('dragleave', () => { if (--dragDepth <= 0) { dragDepth = 0; $('#drop').style.display = 'none'; } });
 addEventListener('dragover', e => e.preventDefault());
 addEventListener('drop', e => {
   e.preventDefault(); dragDepth = 0; $('#drop').style.display = 'none';
-  if (e.dataTransfer.files.length) addFiles(e.dataTransfer.files);
+  if (onFiles() && e.dataTransfer.files.length) addFiles(e.dataTransfer.files);
 });
 addEventListener('beforeunload', e => { if (busy || pending.length) { e.preventDefault(); e.returnValue = ''; } });
 
-// Status kamera
+// ======================= PENGATURAN =======================
+let cfg = {};
+async function loadCfg() {
+  try { cfg = await api('/api/config'); } catch (e) { toast(e.message); return; }
+  $('#cCams').value = cfg.cams; $('#cAudio').checked = cfg.audio;
+  $('#cPath').value = cfg.path; $('#cSeg').value = cfg.seg; $('#cMinFree').value = cfg.minfree; $('#cDays').value = cfg.days;
+  $('#cPort').value = cfg.port; $('#cPass').value = cfg.pass; $('#cWeb').checked = cfg.web;
+  const st = await api('/api/storages').catch(() => []);
+  const opts = st.map(s => `<option value="${esc(s.path)}">${esc(s.path)} — ${fmtSize(s.free)} kosong</option>`);
+  if (cfg.path && !st.some(s => s.path === cfg.path)) opts.unshift(`<option value="${esc(cfg.path)}">${esc(cfg.path)}</option>`);
+  opts.unshift('<option value="">— pilih storage —</option>');
+  $('#cPathSel').innerHTML = opts.join(''); $('#cPathSel').value = cfg.path;
+  showRecState();
+}
+function showRecState() {
+  $('#recState').textContent = cfg.enabled ? '● Aktif' : 'Mati';
+  $('#recState').style.color = cfg.enabled ? 'var(--ok)' : 'var(--mute)';
+}
+$('#cPathSel').onchange = e => { if (e.target.value) $('#cPath').value = e.target.value; };
+$('#cSave').onclick = async () => {
+  const body = {
+    cams: $('#cCams').value, audio: $('#cAudio').checked, path: $('#cPath').value.trim(),
+    seg: +$('#cSeg').value || 10, minfree: +$('#cMinFree').value || 5, days: +$('#cDays').value || 0,
+    port: +$('#cPort').value || 8080, pass: $('#cPass').value, web: $('#cWeb').checked, enabled: cfg.enabled
+  };
+  if (!body.web && !confirm('Web server akan dimatikan dan halaman ini tidak bisa dibuka lagi sampai diaktifkan dari STB. Lanjut?')) return;
+  const moved = body.port !== cfg.port || body.pass !== cfg.pass;
+  $('#cSave').disabled = true;
+  try {
+    await api('/api/config', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+    if (moved) {
+      toast('Tersimpan. Membuka ulang dengan port/password baru…', 6000);
+      setTimeout(() => location.href = location.protocol + '//' + location.hostname + ':' + body.port + '/#cfg', 2500);
+      return;
+    }
+    toast('Tersimpan & diterapkan ✓'); cfg = Object.assign(cfg, body);
+    loaded.play = false;
+  } catch (e) { toast('Gagal: ' + e.message, 6000); }
+  finally { $('#cSave').disabled = false; }
+};
+async function setRec(on) {
+  try {
+    await api('/api/rec?on=' + (on ? 1 : 0), {method:'POST'});
+    cfg.enabled = on; showRecState(); toast(on ? 'Perekaman dimulai' : 'Perekaman dihentikan');
+    setTimeout(status, 3000);
+  } catch (e) { toast(e.message, 6000); }
+}
+$('#recOn').onclick = () => setRec(true);
+$('#recOff').onclick = () => { if (confirm('Hentikan perekaman semua kamera?')) setRec(false); };
+
+// ======================= STATUS =======================
 async function status() {
   try {
     const s = await api('/api/status');
     const pills = [`<span class="pill ${s.recording ? 'ok' : ''}">${s.recording ? '● Merekam' : 'Tidak merekam'}</span>`];
-    s.cams.forEach(c => pills.push(
-      `<span class="pill ${c.status.includes('Merekam') ? 'ok' : (c.status.includes('✕') || c.name === 'ERROR' ? 'bad' : '')}">${esc(c.name)}: ${esc(c.status)}</span>`));
+    s.cams.forEach(c => pills.push(`<span class="pill ${c.status.includes('Merekam') ? 'ok'
+      : (c.status.includes('✕') || c.name === 'ERROR' ? 'bad' : '')}">${esc(c.name)}: ${esc(c.status)}</span>`));
     $('#cams').innerHTML = pills.join('');
   } catch {}
 }
 
-loadRoots().then(load);
+showTab(['play','files','cfg'].includes(location.hash.slice(1)) ? location.hash.slice(1) : 'play');
 status(); setInterval(status, 5000);
 </script>
 </body>

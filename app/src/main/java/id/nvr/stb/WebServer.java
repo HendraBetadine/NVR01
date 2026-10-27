@@ -4,6 +4,9 @@ import android.content.Context;
 import android.util.Base64;
 import android.util.Log;
 
+import org.json.JSONException;
+import org.json.JSONObject;
+
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.ByteArrayOutputStream;
@@ -28,6 +31,9 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.TreeSet;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -165,6 +171,13 @@ public class WebServer {
         if ((m.equals("PUT") || m.equals("POST")) && p.equals("/api/upload")) { upload(r); return; }
         if (m.equals("POST") && p.equals("/api/mkdir")) { mkdir(r); return; }
         if (m.equals("POST") && p.equals("/api/delete")) { delete(r); return; }
+        if (m.equals("GET") && p.equals("/api/config")) { getConfig(r); return; }
+        if (m.equals("POST") && p.equals("/api/config")) { setConfig(r); return; }
+        if (m.equals("POST") && p.equals("/api/rec")) { setRec(r); return; }
+        if (m.equals("GET") && p.equals("/api/storages")) { storages(r); return; }
+        if (m.equals("GET") && p.equals("/api/cams")) { recCams(r); return; }
+        if (m.equals("GET") && p.equals("/api/day")) { recDay(r); return; }
+        if ((m.equals("GET") || m.equals("HEAD")) && p.equals("/play")) { play(r); return; }
         json(r, 404, "{\"error\":\"tidak ditemukan\"}");
     }
 
@@ -239,6 +252,10 @@ public class WebServer {
     private void download(Req r) throws IOException {
         File f = resolve(r.q("root"), r.q("path"));
         if (f == null || !f.isFile()) { json(r, 404, "{\"error\":\"file tidak ada\"}"); return; }
+        serveFile(r, f, "1".equals(r.q("inline")));
+    }
+
+    private void serveFile(Req r, File f, boolean inline) throws IOException {
         long len = f.length(), start = 0, end = len - 1;
         boolean partial = false;
         String range = r.headers.get("range");
@@ -266,7 +283,7 @@ public class WebServer {
         h.append("Content-Length: ").append(count).append("\r\n");
         h.append("Accept-Ranges: bytes\r\n");
         if (partial) h.append("Content-Range: bytes ").append(start).append('-').append(end).append('/').append(len).append("\r\n");
-        if (!"1".equals(r.q("inline"))) {
+        if (!inline) {
             h.append("Content-Disposition: attachment; filename=\"").append(f.getName().replace("\"", "")).append("\"\r\n");
         }
         h.append("Connection: close\r\n\r\n");
@@ -363,6 +380,268 @@ public class WebServer {
             if (kids != null) for (File k : kids) deleteRec(k);
         }
         return f.delete();
+    }
+
+    // =====================================================================
+    //  Pengaturan via web
+    // =====================================================================
+    private void getConfig(Req r) throws IOException {
+        Config c = new Config(ctx);
+        try {
+            JSONObject o = new JSONObject();
+            o.put("cams", c.getCamerasRaw());
+            o.put("path", c.getStoragePath());
+            o.put("seg", c.getSegmentMinutes());
+            o.put("minfree", c.getMinFreeGb());
+            o.put("days", c.getRetentionDays());
+            o.put("audio", c.getAudio());
+            o.put("enabled", c.isEnabled());
+            o.put("web", c.isWebEnabled());
+            o.put("port", c.getWebPort());
+            o.put("pass", c.getWebPassword());
+            json(r, 200, o.toString());
+        } catch (JSONException e) {
+            json(r, 500, "{\"error\":\"json\"}");
+        }
+    }
+
+    private void setConfig(Req r) throws IOException {
+        Config c = new Config(ctx);
+        JSONObject o;
+        try { o = new JSONObject(readBody(r)); }
+        catch (Exception e) { json(r, 400, "{\"error\":\"data tidak valid\"}"); return; }
+
+        String path = o.optString("path", c.getStoragePath()).trim();
+        boolean enabled = o.optBoolean("enabled", c.isEnabled());
+        if (enabled && !Storage.testWrite(path)) {
+            json(r, 400, "{\"error\":\"Folder rekaman tidak bisa ditulis: " + path.replace("\"", "") + "\"}");
+            return;
+        }
+        c.save(o.optString("cams", c.getCamerasRaw()), path,
+                o.optInt("seg", c.getSegmentMinutes()), o.optInt("minfree", c.getMinFreeGb()),
+                o.optInt("days", c.getRetentionDays()), o.optBoolean("audio", c.getAudio()));
+        if (enabled && c.getCameras().isEmpty()) { json(r, 400, "{\"error\":\"Isi minimal satu kamera\"}"); return; }
+        c.setEnabled(enabled);
+        c.saveWeb(o.optBoolean("web", c.isWebEnabled()), o.optInt("port", c.getWebPort()),
+                o.optString("pass", c.getWebPassword()));
+        json(r, 200, "{\"ok\":true}");
+        RecorderService.apply(ctx);    // setelah respons terkirim (web server bisa ikut restart)
+    }
+
+    private void setRec(Req r) throws IOException {
+        Config c = new Config(ctx);
+        boolean on = "1".equals(r.q("on"));
+        if (on && (c.getCameras().isEmpty() || !Storage.testWrite(c.getStoragePath()))) {
+            json(r, 400, "{\"error\":\"Lengkapi kamera & folder rekaman dulu di Pengaturan\"}");
+            return;
+        }
+        c.setEnabled(on);
+        json(r, 200, "{\"ok\":true}");
+        RecorderService.apply(ctx);
+    }
+
+    private void storages(Req r) throws IOException {
+        StringBuilder sb = new StringBuilder("[");
+        for (String s : Storage.recordingCandidates(ctx)) {
+            if (sb.length() > 1) sb.append(',');
+            sb.append("{\"path\":").append(js(s)).append(",\"free\":").append(RecorderService.freeBytes(new File(s))).append('}');
+        }
+        json(r, 200, sb.append(']').toString());
+    }
+
+    private String readBody(Req r) throws IOException {
+        long len;
+        try { len = Long.parseLong(r.headers.get("content-length")); } catch (Exception e) { return ""; }
+        if (len > 1024 * 1024) throw new IOException("body terlalu besar");
+        byte[] b = new byte[(int) len];
+        int off = 0;
+        while (off < len) {
+            int n = r.in.read(b, off, (int) len - off);
+            if (n < 0) break;
+            off += n;
+        }
+        return new String(b, 0, off, "UTF-8");
+    }
+
+    // =====================================================================
+    //  Playback rekaman
+    // =====================================================================
+    private static final Pattern REC = Pattern.compile("^(.+)_(\\d{8})_(\\d{6})\\.mkv$");
+    private static final Object PLAY_LOCK = new Object();
+
+    private File recRoot() {
+        String p = new Config(ctx).getStoragePath();
+        return p.isEmpty() ? null : new File(p);
+    }
+
+    /** Daftar kamera + tanggal yang punya rekaman. */
+    private void recCams(Req r) throws IOException {
+        File root = recRoot();
+        File[] dirs = root == null ? null : root.listFiles();
+        StringBuilder sb = new StringBuilder("[");
+        if (dirs != null) {
+            Arrays.sort(dirs);
+            for (File d : dirs) {
+                if (!d.isDirectory() || d.getName().startsWith(".")) continue;
+                TreeSet<String> days = new TreeSet<>(Collections.<String>reverseOrder());
+                String[] names = d.list();
+                if (names != null) for (String n : names) {
+                    Matcher m = REC.matcher(n);
+                    if (m.matches()) days.add(m.group(2));
+                }
+                if (days.isEmpty()) continue;
+                if (sb.length() > 1) sb.append(',');
+                sb.append("{\"name\":").append(js(d.getName())).append(",\"days\":[");
+                boolean first = true;
+                for (String day : days) {
+                    if (!first) sb.append(',');
+                    first = false;
+                    sb.append(js(day));
+                }
+                sb.append("]}");
+            }
+        }
+        json(r, 200, sb.append(']').toString());
+    }
+
+    /** Daftar file rekaman 1 kamera pada 1 hari, urut waktu. */
+    private void recDay(Req r) throws IOException {
+        File dir = camDir(r.q("cam"));
+        String day = r.q("day");
+        if (dir == null) { json(r, 404, "{\"error\":\"kamera tidak ada\"}"); return; }
+        String[] names = dir.list();
+        List<String> list = new ArrayList<>();
+        if (names != null) for (String n : names) {
+            Matcher m = REC.matcher(n);
+            if (m.matches() && m.group(2).equals(day)) list.add(n);
+        }
+        Collections.sort(list, new Comparator<String>() {
+            @Override public int compare(String a, String b) {
+                return a.substring(a.length() - 10).compareTo(b.substring(b.length() - 10));
+            }
+        });
+        String newest = newestRec(dir);
+        StringBuilder sb = new StringBuilder("{\"seg\":").append(new Config(ctx).getSegmentMinutes()).append(",\"files\":[");
+        boolean first = true;
+        for (String n : list) {
+            Matcher m = REC.matcher(n);
+            if (!m.matches()) continue;
+            String hms = m.group(3);
+            int sec = Integer.parseInt(hms.substring(0, 2)) * 3600
+                    + Integer.parseInt(hms.substring(2, 4)) * 60 + Integer.parseInt(hms.substring(4, 6));
+            if (!first) sb.append(',');
+            first = false;
+            sb.append("{\"f\":").append(js(n))
+              .append(",\"sec\":").append(sec)
+              .append(",\"s\":").append(new File(dir, n).length())
+              .append(",\"live\":").append(n.equals(newest))
+              .append('}');
+        }
+        json(r, 200, sb.append("]}").toString());
+    }
+
+    /**
+     * Putar 1 file rekaman di browser. MKV di-remux (tanpa encode ulang) ke MP4 "faststart",
+     * disimpan di cache supaya bisa di-seek, lalu dikirim dengan dukungan Range.
+     */
+    private void play(Req r) throws IOException {
+        File dir = camDir(r.q("cam"));
+        String name = new File(r.q("file")).getName();
+        if (dir == null || !REC.matcher(name).matches()) { json(r, 404, "{\"error\":\"file tidak ada\"}"); return; }
+        File src = new File(dir, name);
+        if (!src.isFile()) { json(r, 404, "{\"error\":\"file tidak ada\"}"); return; }
+
+        File cacheDir = new File(recRoot(), ".playcache");
+        cacheDir.mkdirs();
+        File mp4 = new File(cacheDir, dir.getName() + "__" + name.replace(".mkv", ".mp4"));
+        boolean audio = "1".equals(r.q("audio"));
+        if (audio) mp4 = new File(cacheDir, mp4.getName().replace(".mp4", "_a.mp4"));
+
+        synchronized (PLAY_LOCK) {   // 1 konversi sekaligus supaya CPU STB tidak kewalahan
+            // File yang masih direkam terus bertambah: cache dipakai ulang 60 dtk supaya seek tidak memicu remux ulang.
+            boolean stale = mp4.lastModified() < src.lastModified()
+                    && System.currentTimeMillis() - mp4.lastModified() > 60_000;
+            if (!mp4.isFile() || stale) {
+                if (!remux(src, mp4, audio)) {
+                    json(r, 500, "{\"error\":\"gagal menyiapkan video (lihat file ffmpeg.log di folder .playcache)\"}");
+                    return;
+                }
+                pruneCache(cacheDir, mp4);
+            }
+        }
+        serveFile(r, mp4, true);
+    }
+
+    private boolean remux(File src, File out, boolean audio) {
+        File ffmpeg = new File(ctx.getApplicationInfo().nativeLibraryDir, "libffmpeg.so");
+        File tmp = new File(out.getParentFile(), "tmp_" + out.getName());
+        List<String> cmd = new ArrayList<>(Arrays.asList(
+                ffmpeg.getAbsolutePath(), "-nostdin", "-y", "-hide_banner", "-loglevel", "error",
+                "-i", src.getAbsolutePath(), "-map", "0:v:0"));
+        if (audio) { cmd.add("-map"); cmd.add("0:a:0?"); }
+        else cmd.add("-an");
+        cmd.addAll(Arrays.asList("-c", "copy", "-movflags", "+faststart", "-f", "mp4", tmp.getAbsolutePath()));
+        try {
+            final Process p = new ProcessBuilder(cmd).redirectErrorStream(true).start();
+            final File log = new File(out.getParentFile(), "ffmpeg.log");
+            new Thread(new Runnable() {      // simpan pesan error ffmpeg (API 19 belum punya redirectOutput)
+                @Override public void run() {
+                    try {
+                        InputStream is = p.getInputStream();
+                        FileOutputStream fo = new FileOutputStream(log);
+                        byte[] b = new byte[4096];
+                        int n;
+                        while ((n = is.read(b)) > 0) fo.write(b, 0, n);
+                        fo.close();
+                    } catch (Exception ignored) { }
+                }
+            }, "remux-log").start();
+            long deadline = System.currentTimeMillis() + 5 * 60_000;
+            while (true) {
+                try { int code = p.exitValue();
+                      if (code == 0 && tmp.length() > 0) { out.delete(); return tmp.renameTo(out); }
+                      tmp.delete(); return false; }
+                catch (IllegalThreadStateException running) {
+                    if (System.currentTimeMillis() > deadline) { p.destroy(); tmp.delete(); return false; }
+                    Thread.sleep(300);
+                }
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "remux", e);
+            tmp.delete();
+            return false;
+        }
+    }
+
+    /** Simpan maksimal 6 video di cache, hapus yang lama. */
+    private static void pruneCache(File cacheDir, File keep) {
+        File[] fs = cacheDir.listFiles();
+        if (fs == null) return;
+        List<File> mp4s = new ArrayList<>();
+        for (File f : fs) if (f.getName().endsWith(".mp4") && !f.equals(keep)) mp4s.add(f);
+        Collections.sort(mp4s, new Comparator<File>() {
+            @Override public int compare(File a, File b) { return Long.compare(b.lastModified(), a.lastModified()); }
+        });
+        for (int i = 5; i < mp4s.size(); i++) mp4s.get(i).delete();
+    }
+
+    private File camDir(String cam) {
+        File root = recRoot();
+        if (root == null) return null;
+        String n = new File(cam).getName();
+        if (n.isEmpty() || n.startsWith(".")) return null;
+        File d = new File(root, n);
+        return d.isDirectory() ? d : null;
+    }
+
+    private static String newestRec(File dir) {
+        String newest = null;
+        long t = 0;
+        File[] fs = dir.listFiles();
+        if (fs != null) for (File f : fs) {
+            if (REC.matcher(f.getName()).matches() && f.lastModified() > t) { t = f.lastModified(); newest = f.getName(); }
+        }
+        return newest;
     }
 
     // =====================================================================
