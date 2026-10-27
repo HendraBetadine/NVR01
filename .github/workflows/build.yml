@@ -1,0 +1,48 @@
+name: Build APK
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Android NDK r25c (masih support Android 4.4)
+        id: ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r25c
+          add-to-path: false
+
+      - name: Cache ffmpeg
+        id: cache-ffmpeg
+        uses: actions/cache@v4
+        with:
+          path: app/src/main/jniLibs/armeabi-v7a/libffmpeg.so
+          key: ffmpeg-n7.1-armv7-api19-${{ hashFiles('scripts/build-ffmpeg.sh') }}
+
+      - name: Build ffmpeg (ARMv7, API 19)
+        if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+        run: bash scripts/build-ffmpeg.sh
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Build APK
+        run: gradle --no-daemon assembleRelease
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: STBNVR-apk
+          path: app/build/outputs/apk/release/*.apk

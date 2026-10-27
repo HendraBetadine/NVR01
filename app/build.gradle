@@ -1,0 +1,35 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'id.nvr.stb'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "id.nvr.stb"
+        minSdk 19            // Android 4.4 KitKat (Formuler Z+)
+        targetSdk 34
+        versionCode 1
+        versionName "1.0"
+        ndk { abiFilters 'armeabi-v7a' }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            // Ditandatangani dengan debug key supaya APK langsung bisa diinstal (sideload).
+            signingConfig signingConfigs.debug
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+
+    // Wajib: libffmpeg.so harus diekstrak ke nativeLibraryDir agar bisa dieksekusi.
+    packaging {
+        jniLibs { useLegacyPackaging = true }
+    }
+}
