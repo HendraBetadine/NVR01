@@ -2,6 +2,14 @@ plugins {
     id 'com.android.application'
 }
 
+// Nomor build GitHub Actions -> versionCode selalu naik, jadi APK baru bisa menimpa yang lama.
+def buildNumber = (System.getenv("GITHUB_RUN_NUMBER") ?: "1").toInteger()
+// Kunci tanda tangan tetap (dari GitHub Secret). Tanpa ini setiap build punya kunci berbeda
+// dan Android menolak update ("harus uninstall dulu").
+def ksFile = System.getenv("KEYSTORE_FILE")
+def ksPass = System.getenv("KEYSTORE_PASSWORD")
+def hasKeystore = ksFile && ksPass && file(ksFile).exists()
+
 android {
     namespace 'id.nvr.stb'
     compileSdk 34
@@ -10,16 +18,26 @@ android {
         applicationId "id.nvr.stb"
         minSdk 19            // Android 4.4 KitKat (Formuler Z+)
         targetSdk 34
-        versionCode 1
-        versionName "1.0"
+        versionCode buildNumber
+        versionName "1.${buildNumber}"
         ndk { abiFilters 'armeabi-v7a' }
+    }
+
+    signingConfigs {
+        release {
+            if (hasKeystore) {
+                storeFile file(ksFile)
+                storePassword ksPass
+                keyAlias "stbnvr"
+                keyPassword ksPass
+            }
+        }
     }
 
     buildTypes {
         release {
             minifyEnabled false
-            // Ditandatangani dengan debug key supaya APK langsung bisa diinstal (sideload).
-            signingConfig signingConfigs.debug
+            signingConfig hasKeystore ? signingConfigs.release : signingConfigs.debug
         }
     }
 

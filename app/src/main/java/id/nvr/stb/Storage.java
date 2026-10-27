@@ -72,6 +72,20 @@ public class Storage {
         } catch (Exception ignored) { }
     }
 
+    /**
+     * Folder bersama di /sdcard/STBNVR/<sub> (tetap ada walau aplikasi di-uninstall).
+     * Jika tidak bisa ditulis, pakai folder milik aplikasi.
+     */
+    public static File shareDir(Context ctx, String sub) {
+        File d = new File(new File(Environment.getExternalStorageDirectory(), "STBNVR"), sub);
+        if (testWrite(d.getAbsolutePath())) return d;
+        File f = ctx.getExternalFilesDir(sub);
+        if (f != null && testWrite(f.getAbsolutePath())) return f;
+        File in = new File(ctx.getFilesDir(), sub);
+        in.mkdirs();
+        return in;
+    }
+
     public static boolean testWrite(String path) {
         if (path == null || path.isEmpty()) return false;
         try {

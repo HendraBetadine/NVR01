@@ -178,6 +178,13 @@ public class WebServer {
         if ((m.equals("PUT") || m.equals("POST")) && p.equals("/api/upload")) { upload(r); return; }
         if (m.equals("POST") && p.equals("/api/mkdir")) { mkdir(r); return; }
         if (m.equals("POST") && p.equals("/api/delete")) { delete(r); return; }
+        if (m.equals("GET") && p.equals("/api/version")) { version(r); return; }
+        if ((m.equals("PUT") || m.equals("POST")) && p.equals("/api/update")) { updateApk(r); return; }
+        if (m.equals("GET") && p.equals("/api/backups")) { listBackups(r); return; }
+        if (m.equals("GET") && p.equals("/api/backups/get")) { getBackup(r); return; }
+        if (m.equals("POST") && p.equals("/api/backups")) { saveBackup(r); return; }
+        if (m.equals("POST") && p.equals("/api/backups/delete")) { deleteBackup(r); return; }
+        if (m.equals("GET") && p.equals("/api/log")) { camLog(r); return; }
         if (m.equals("GET") && p.equals("/api/config")) { getConfig(r); return; }
         if (m.equals("POST") && p.equals("/api/config")) { setConfig(r); return; }
         if (m.equals("POST") && p.equals("/api/rec")) { setRec(r); return; }
@@ -427,6 +434,163 @@ public class WebServer {
             if (kids != null) for (File k : kids) deleteRec(k);
         }
         return f.delete();
+    }
+
+    // =====================================================================
+    //  Update aplikasi lewat web
+    // =====================================================================
+    private void version(Req r) throws IOException {
+        try {
+            android.content.pm.PackageInfo pi = ctx.getPackageManager().getPackageInfo(ctx.getPackageName(), 0);
+            json(r, 200, "{\"name\":" + js(pi.versionName) + ",\"code\":" + pi.versionCode + "}");
+        } catch (Exception e) {
+            json(r, 200, "{\"name\":\"?\",\"code\":0}");
+        }
+    }
+
+    /** Terima file APK, cek isinya, lalu buka layar "Install" di TV STB. */
+    private void updateApk(Req r) throws IOException {
+        File dir = Storage.shareDir(ctx, "update");
+        File apk = new File(dir, "STBNVR-update.apk");
+        String err = receiveFile(r, apk);
+        if (err != null) { json(r, 400, "{\"error\":" + js(err) + "}"); return; }
+
+        android.content.pm.PackageManager pm = ctx.getPackageManager();
+        android.content.pm.PackageInfo info = pm.getPackageArchiveInfo(apk.getAbsolutePath(), 0);
+        if (info == null) { apk.delete(); json(r, 400, "{\"error\":\"File bukan APK yang valid\"}"); return; }
+        if (!ctx.getPackageName().equals(info.packageName)) {
+            apk.delete();
+            json(r, 400, "{\"error\":" + js("Ini APK aplikasi lain (" + info.packageName + "), bukan STB NVR") + "}");
+            return;
+        }
+        apk.setReadable(true, false);   // installer sistem harus bisa membaca file ini
+        try {
+            android.content.Intent i = new android.content.Intent(android.content.Intent.ACTION_VIEW);
+            i.setDataAndType(android.net.Uri.fromFile(apk), "application/vnd.android.package-archive");
+            i.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
+            ctx.startActivity(i);
+        } catch (Exception e) {
+            json(r, 500, "{\"error\":" + js("Gagal membuka installer: " + e.getMessage()
+                    + ". File tersimpan di " + apk.getAbsolutePath()) + "}");
+            return;
+        }
+        json(r, 200, "{\"ok\":true,\"version\":" + js(info.versionName) + "}");
+    }
+
+    /** Tulis body request langsung ke file (lewat file sementara). Return pesan error atau null. */
+    private String receiveFile(Req r, File target) throws IOException {
+        long len;
+        try { len = Long.parseLong(r.headers.get("content-length")); } catch (Exception e) { return "Content-Length wajib"; }
+        if (len > RecorderService.freeBytes(target.getParentFile())) return "Ruang penyimpanan tidak cukup";
+        if ("100-continue".equalsIgnoreCase(r.headers.get("expect"))) {
+            r.out.write("HTTP/1.1 100 Continue\r\n\r\n".getBytes("UTF-8"));
+            r.out.flush();
+        }
+        File part = new File(target.getParentFile(), "." + target.getName() + ".part");
+        FileOutputStream fos;
+        try { fos = new FileOutputStream(part); } catch (IOException e) { return "Folder tidak bisa ditulis"; }
+        long left = len;
+        try {
+            byte[] buf = new byte[BUF];
+            while (left > 0) {
+                int n = r.in.read(buf, 0, (int) Math.min(buf.length, left));
+                if (n < 0) break;
+                fos.write(buf, 0, n);
+                left -= n;
+            }
+            fos.getFD().sync();
+        } finally {
+            fos.close();
+        }
+        if (left > 0) { part.delete(); return "Upload terputus"; }
+        target.delete();
+        if (!part.renameTo(target)) { part.delete(); return "Gagal menyimpan file"; }
+        return null;
+    }
+
+    // =====================================================================
+    //  Backup & restore daftar kamera  (/sdcard/STBNVR/backup/*.txt)
+    // =====================================================================
+    private File backupFile(String name) {
+        String n = name == null ? "" : name.trim().replaceAll("\\.txt$", "").replaceAll("[^A-Za-z0-9 _.-]", "_");
+        if (n.isEmpty() || n.startsWith(".")) return null;
+        return new File(Storage.shareDir(ctx, "backup"), n + ".txt");
+    }
+
+    private void listBackups(Req r) throws IOException {
+        File[] fs = Storage.shareDir(ctx, "backup").listFiles();
+        List<File> list = new ArrayList<>();
+        if (fs != null) for (File f : fs) if (f.getName().endsWith(".txt")) list.add(f);
+        Collections.sort(list, new Comparator<File>() {
+            @Override public int compare(File a, File b) { return Long.compare(b.lastModified(), a.lastModified()); }
+        });
+        StringBuilder sb = new StringBuilder("[");
+        for (File f : list) {
+            int cams = 0;
+            for (String line : readText(f).split("\n")) {
+                String t = line.trim();
+                if (!t.isEmpty() && !t.startsWith("#")) cams++;
+            }
+            if (sb.length() > 1) sb.append(',');
+            sb.append("{\"name\":").append(js(f.getName().replaceAll("\\.txt$", "")))
+              .append(",\"t\":").append(f.lastModified())
+              .append(",\"cams\":").append(cams).append('}');
+        }
+        json(r, 200, sb.append(']').toString());
+    }
+
+    private void getBackup(Req r) throws IOException {
+        File f = backupFile(r.q("name"));
+        if (f == null || !f.isFile()) { json(r, 404, "{\"error\":\"backup tidak ada\"}"); return; }
+        send(r, 200, "text/plain; charset=utf-8", readText(f).getBytes("UTF-8"),
+                "1".equals(r.q("dl")) ? "Content-Disposition: attachment; filename=\"" + f.getName() + "\"\r\n" : null);
+    }
+
+    private void saveBackup(Req r) throws IOException {
+        File f = backupFile(r.q("name"));
+        if (f == null) { json(r, 400, "{\"error\":\"nama backup tidak valid\"}"); return; }
+        String body = readBody(r);
+        String text = "# STB NVR - backup daftar kamera - "
+                + new SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US).format(new Date()) + "\n"
+                + body.replace("\r\n", "\n").replaceAll("(?m)^# STB NVR - backup.*\\n?", "");
+        FileOutputStream fo = new FileOutputStream(f);
+        fo.write(text.getBytes("UTF-8"));
+        fo.close();
+        json(r, 200, "{\"ok\":true,\"path\":" + js(f.getAbsolutePath()) + "}");
+    }
+
+    private void deleteBackup(Req r) throws IOException {
+        File f = backupFile(r.q("name"));
+        json(r, f != null && f.delete() ? 200 : 404, "{\"ok\":true}");
+    }
+
+    private static String readText(File f) {
+        try {
+            RandomAccessFile raf = new RandomAccessFile(f, "r");
+            byte[] b = new byte[(int) Math.min(raf.length(), 1024 * 1024)];
+            raf.readFully(b);
+            raf.close();
+            return new String(b, "UTF-8");
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    /** 64 KB terakhir dari ffmpeg.log kamera (untuk diagnosa). */
+    private void camLog(Req r) throws IOException {
+        File dir = camDir(r.q("cam"));
+        File f = dir == null ? null : new File(dir, "ffmpeg.log");
+        if (f == null || !f.isFile()) {
+            send(r, 200, "text/plain; charset=utf-8", "(belum ada log untuk kamera ini)".getBytes("UTF-8"), null);
+            return;
+        }
+        RandomAccessFile raf = new RandomAccessFile(f, "r");
+        long start = Math.max(0, raf.length() - 64 * 1024);
+        byte[] b = new byte[(int) (raf.length() - start)];
+        raf.seek(start);
+        raf.readFully(b);
+        raf.close();
+        send(r, 200, "text/plain; charset=utf-8", b, "Cache-Control: no-store\r\n");
     }
 
     // =====================================================================

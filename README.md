@@ -14,6 +14,17 @@ jalan otomatis saat box menyala, dan hapus rekaman terlama saat disk hampir penu
 3. Buka tab **Actions** → tunggu ±10–15 menit sampai centang hijau (build pertama lama karena compile ffmpeg).
 4. Klik build-nya → bagian **Artifacts** → download **STBNVR-apk** → ekstrak, dapat `app-release.apk`.
 
+### Kunci tanda tangan (wajib supaya update tidak perlu uninstall)
+Di repo GitHub: **Settings → Secrets and variables → Actions → New repository secret**, buat dua secret:
+- `KEYSTORE_BASE64` — isi file `KEYSTORE_BASE64.txt`
+- `KEYSTORE_PASSWORD` — isi file `KEYSTORE_PASSWORD.txt`
+
+Simpan file `stbnvr.jks` + password di tempat aman. Jangan di-commit ke repo (repo ini publik).
+Kalau kunci hilang, versi berikutnya harus uninstall dulu.
+
+Setelah secret terpasang, setiap build menerbitkan APK di
+`https://github.com/HendraBetadine/NVR01/releases/latest/download/STBNVR.apk`.
+
 ## B. Install ke Formuler Z+
 
 1. Di box: **Settings → Security → Unknown sources** → aktifkan.

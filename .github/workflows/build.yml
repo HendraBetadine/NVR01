@@ -4,6 +4,9 @@ on:
   push:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-22.04
@@ -39,10 +42,38 @@ jobs:
         with:
           gradle-version: '8.7'
 
+      - name: Siapkan kunci tanda tangan (dari secret KEYSTORE_BASE64)
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/stbnvr.jks"
+            echo "KEYSTORE_FILE=$RUNNER_TEMP/stbnvr.jks" >> "$GITHUB_ENV"
+            echo "SIGNED=1" >> "$GITHUB_ENV"
+          else
+            echo "::warning::Secret KEYSTORE_BASE64 belum diisi - APK memakai kunci debug acak (update harus uninstall)."
+          fi
+
       - name: Build APK
-        run: gradle --no-daemon assembleRelease
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+        run: |
+          gradle --no-daemon assembleRelease
+          cp app/build/outputs/apk/release/app-release.apk STBNVR.apk
 
       - uses: actions/upload-artifact@v4
         with:
           name: STBNVR-apk
-          path: app/build/outputs/apk/release/*.apk
+          path: STBNVR.apk
+
+      # APK langsung bisa diunduh di:
+      # https://github.com/<owner>/<repo>/releases/latest/download/STBNVR.apk
+      - name: Terbitkan ke GitHub Releases
+        if: env.SIGNED == '1' && github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: STB NVR 1.${{ github.run_number }}
+          body: ${{ github.event.head_commit.message }}
+          files: STBNVR.apk
+          make_latest: true

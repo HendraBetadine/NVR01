@@ -93,6 +93,8 @@
   .check { display:flex; gap:8px; align-items:center; margin-bottom:12px; }
   .check input { width:auto; }
   .recstate { font-weight:600; }
+  pre.log { background:#0b0d10; border:1px solid var(--line); border-radius:8px; padding:10px; margin:0;
+            max-height:320px; overflow:auto; font-size:12px; white-space:pre-wrap; overflow-wrap:anywhere; }
   #toast { position:fixed; left:50%; bottom:20px; transform:translateX(-50%); background:var(--panel2);
            border:1px solid var(--line); padding:10px 16px; border-radius:8px; display:none; z-index:10; }
   @media (max-width:640px) { td.t, th.t { display:none; } .grid3 { grid-template-columns:1fr; } #cams { margin-left:0; } }
@@ -188,6 +190,17 @@
         <textarea id="cCams" spellcheck="false"
           placeholder="depan,rtsp://admin:12345@192.168.1.64:554/Streaming/Channels/102"></textarea></label>
       <div class="check"><input type="checkbox" id="cAudio"><label for="cAudio">Rekam audio (jika kamera punya)</label></div>
+      <div class="bar" style="margin:0">
+        <button id="bkSave">💾 Simpan daftar ke backup…</button>
+        <button id="bkImport">📄 Impor dari file .txt</button>
+        <input type="file" id="bkFile" accept=".txt,text/plain" hidden>
+      </div>
+      <table style="margin-top:10px">
+        <thead><tr><th>Backup daftar kamera</th><th>Kamera</th><th class="t">Disimpan</th><th></th></tr></thead>
+        <tbody id="bkList"></tbody>
+      </table>
+      <div class="mute" style="margin-top:6px">Backup disimpan di STB (/sdcard/STBNVR/backup) dan tetap ada walau aplikasi di-uninstall.
+        Setelah "Pulihkan", klik <b>Simpan &amp; terapkan</b> di bawah.</div>
     </div>
 
     <div class="card">
@@ -215,6 +228,28 @@
     <div class="bar">
       <button class="primary" id="cSave">💾 Simpan & terapkan</button>
       <span class="mute">Menyimpan akan me-restart perekaman beberapa detik.</span>
+    </div>
+
+    <div class="card">
+      <h2>Log kamera</h2>
+      <div class="bar">
+        <select id="logCam"></select>
+        <button id="logRef">⟳ Muat log</button>
+      </div>
+      <pre id="logText" class="log">Pilih kamera lalu klik "Muat log".</pre>
+    </div>
+
+    <div class="card">
+      <h2>Update aplikasi</h2>
+      <div style="margin-bottom:10px">Versi terpasang: <b id="appVer">—</b>
+        · <a href="https://github.com/HendraBetadine/NVR01/releases/latest/download/STBNVR.apk" style="color:var(--acc)">⬇ Download APK terbaru</a></div>
+      <div class="bar">
+        <button class="primary" id="updBtn">⬆ Pilih file APK & update</button>
+        <input type="file" id="updFile" accept=".apk" hidden>
+        <span class="mute" id="updMsg"></span>
+      </div>
+      <progress id="updProg" max="100" value="0" style="width:100%;display:none;accent-color:var(--acc)"></progress>
+      <div class="mute">Setelah upload, layar <b>Install</b> muncul di TV — tekan Install dengan remote (Android tidak mengizinkan install tanpa konfirmasi). Perekaman otomatis jalan lagi setelah update.</div>
     </div>
   </section>
 </main>
@@ -557,7 +592,86 @@ async function loadCfg() {
   opts.unshift('<option value="">— pilih storage —</option>');
   $('#cPathSel').innerHTML = opts.join(''); $('#cPathSel').value = cfg.path;
   showRecState();
+  loadBackups(); fillLogCams();
+  api('/api/version').then(v => $('#appVer').textContent = v.name + ' (build ' + v.code + ')').catch(() => {});
 }
+
+// ---- Backup & restore daftar kamera ----
+async function loadBackups() {
+  const list = await api('/api/backups').catch(() => []);
+  $('#bkList').innerHTML = list.map(b => `<tr><td class="n">${esc(b.name)}</td><td class="s">${b.cams}</td>
+    <td class="t">${fmtDate(b.t)}</td><td style="white-space:nowrap">
+    <button data-restore="${esc(b.name)}">↩ Pulihkan</button>
+    <a class="x" href="/api/backups/get?${q({name:b.name, dl:1})}" title="Download">⬇</a>
+    <button class="x" data-bkdel="${esc(b.name)}" title="Hapus">✕</button></td></tr>`).join('')
+    || '<tr><td colspan="4" class="empty">Belum ada backup.</td></tr>';
+}
+$('#bkSave').onclick = async () => {
+  const cams = $('#cCams').value.trim();
+  if (!cams) { toast('Daftar kamera masih kosong'); return; }
+  const d = new Date();
+  const def = 'kamera-' + d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate()) + '-' + pad(d.getHours()) + pad(d.getMinutes());
+  const name = prompt('Nama backup:', def); if (!name) return;
+  try {
+    await api('/api/backups?' + q({name}), {method:'POST', headers:{'Content-Type':'text/plain'}, body: cams});
+    toast('Backup "' + name + '" tersimpan ✓'); loadBackups();
+  } catch (e) { toast('Gagal: ' + e.message, 6000); }
+};
+$('#bkList').addEventListener('click', async e => {
+  const rb = e.target.closest('[data-restore]'), db = e.target.closest('[data-bkdel]');
+  if (rb) {
+    if ($('#cCams').value.trim() && !confirm('Ganti daftar kamera di form dengan backup "' + rb.dataset.restore + '"?')) return;
+    const r = await fetch('/api/backups/get?' + q({name: rb.dataset.restore}));
+    $('#cCams').value = (await r.text()).trim() + '\n';
+    $('#cCams').scrollIntoView({behavior:'smooth', block:'center'});
+    toast('Dipulihkan ke form. Klik "Simpan & terapkan" untuk memakai.', 5000);
+  }
+  if (db && confirm('Hapus backup "' + db.dataset.bkdel + '"?')) {
+    await api('/api/backups/delete?' + q({name: db.dataset.bkdel}), {method:'POST'}).catch(() => {});
+    loadBackups();
+  }
+});
+$('#bkImport').onclick = () => $('#bkFile').click();
+$('#bkFile').onchange = async e => {
+  const f = e.target.files[0]; e.target.value = ''; if (!f) return;
+  $('#cCams').value = (await f.text()).trim() + '\n';
+  toast('Diimpor ke form. Klik "Simpan & terapkan" untuk memakai.', 5000);
+};
+
+// ---- Log kamera ----
+function fillLogCams() {
+  const names = $('#cCams').value.split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#'))
+    .map((l, i) => { const c = l.indexOf(','); return c > 0 && !l.slice(0, c).includes('://') ? l.slice(0, c).trim().replace(/[^A-Za-z0-9_-]/g, '_') : 'cam' + (i + 1); });
+  $('#logCam').innerHTML = names.map(n => `<option>${esc(n)}</option>`).join('');
+}
+$('#logRef').onclick = async () => {
+  const cam = $('#logCam').value; if (!cam) return;
+  $('#logText').textContent = 'memuat…';
+  const r = await fetch('/api/log?' + q({cam}));
+  $('#logText').textContent = (await r.text()) || '(log kosong)';
+  $('#logText').scrollTop = 1e9;
+};
+
+// ---- Update aplikasi ----
+$('#updBtn').onclick = () => $('#updFile').click();
+$('#updFile').onchange = e => {
+  const f = e.target.files[0]; e.target.value = ''; if (!f) return;
+  const xhr = new XMLHttpRequest(), pr = $('#updProg');
+  pr.style.display = 'block'; pr.value = 0; $('#updBtn').disabled = true;
+  $('#updMsg').textContent = 'Mengunggah ' + f.name + '…';
+  xhr.open('PUT', '/api/update');
+  xhr.upload.onprogress = ev => { if (ev.lengthComputable) pr.value = ev.loaded / ev.total * 100; };
+  xhr.onload = () => {
+    $('#updBtn').disabled = false;
+    let j = {}; try { j = JSON.parse(xhr.responseText); } catch {}
+    if (xhr.status === 200) {
+      $('#updMsg').textContent = '✓ Versi ' + j.version + ' siap. Tekan "Install" di layar TV dengan remote.';
+      toast('Konfirmasi Install di layar TV', 8000);
+    } else $('#updMsg').textContent = '✕ ' + (j.error || ('HTTP ' + xhr.status));
+  };
+  xhr.onerror = () => { $('#updBtn').disabled = false; $('#updMsg').textContent = '✕ koneksi terputus'; };
+  xhr.send(f);
+};
 function showRecState() {
   $('#recState').textContent = cfg.enabled ? '● Aktif' : 'Mati';
   $('#recState').style.color = cfg.enabled ? 'var(--ok)' : 'var(--mute)';
