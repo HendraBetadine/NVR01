@@ -30,6 +30,23 @@
   button:disabled { opacity:.5; cursor:default; }
   .mute { color:var(--mute); font-size:13px; }
 
+  /* ---- Live ---- */
+  .seg-btns { display:flex; } .seg-btns button { border-radius:0; margin-left:-1px; min-width:44px; }
+  .seg-btns button:first-child { border-radius:8px 0 0 8px; } .seg-btns button:last-child { border-radius:0 8px 8px 0; }
+  .seg-btns button.on { background:var(--acc); color:#06121c; border-color:var(--acc); font-weight:600; }
+  .grid { display:grid; gap:3px; background:#000; padding:3px; border-radius:10px; }
+  .grid:fullscreen { border-radius:0; height:100vh; align-content:center; }
+  .tile { position:relative; aspect-ratio:16/9; background:#0b0d10; overflow:hidden; cursor:pointer; }
+  .tile video { width:100%; height:100%; object-fit:contain; display:block; background:#000; }
+  .tile .lbl { position:absolute; left:6px; bottom:6px; font-size:12px; background:rgba(0,0,0,.55);
+               padding:2px 8px; border-radius:6px; display:flex; gap:6px; align-items:center; }
+  .tile .dot { width:8px; height:8px; border-radius:50%; background:var(--mute); }
+  .tile .dot.ok { background:var(--bad); animation:blink 1.6s infinite; }
+  @keyframes blink { 50% { opacity:.35; } }
+  .tile .msg { position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+               color:var(--mute); font-size:13px; text-align:center; padding:10px; pointer-events:none; }
+  .tile.empty { cursor:default; }
+
   /* ---- Playback ---- */
   .player { background:#000; border-radius:10px; overflow:hidden; position:relative; aspect-ratio:16/9; }
   .player video { width:100%; height:100%; display:block; }
@@ -85,7 +102,8 @@
 <header>
   <h1>📹 STB NVR</h1>
   <nav>
-    <button data-tab="play" class="on">▶ Playback</button>
+    <button data-tab="live" class="on">🖥 Live</button>
+    <button data-tab="play">▶ Playback</button>
     <button data-tab="files">📁 File</button>
     <button data-tab="cfg">⚙ Pengaturan</button>
   </nav>
@@ -93,8 +111,22 @@
 </header>
 
 <main>
+  <!-- ================= LIVE ================= -->
+  <section id="live" class="on">
+    <div class="bar">
+      <div class="seg-btns" id="lvLayouts">
+        <button data-l="1">1</button><button data-l="4">4</button><button data-l="9">9</button><button data-l="16">16</button>
+      </div>
+      <button id="lvPrev">◀</button><span class="mute" id="lvPage">1/1</span><button id="lvNext">▶</button>
+      <button id="lvFull">⛶ Layar penuh</button>
+      <span class="mute" style="margin-left:auto" id="lvClock"></span>
+    </div>
+    <div class="grid" id="grid"></div>
+    <div class="mute" style="margin-top:8px">Klik dua kali kamera untuk memperbesar / kembali ke grid. Live view butuh perekaman aktif (jeda ±4–6 detik).</div>
+  </section>
+
   <!-- ================= PLAYBACK ================= -->
-  <section id="play" class="on">
+  <section id="play">
     <div class="bar">
       <select id="pCam" title="Kamera"></select>
       <select id="pDay" title="Tanggal"></select>
@@ -219,9 +251,106 @@ const loaded = {};
 function showTab(id) {
   document.querySelectorAll('nav button').forEach(b => b.classList.toggle('on', b.dataset.tab === id));
   document.querySelectorAll('section').forEach(s => s.classList.toggle('on', s.id === id));
-  if (!loaded[id]) { loaded[id] = true; ({play: initPlay, files: initFiles, cfg: loadCfg})[id](); }
+  if (id !== 'live') stopLive(); else if (loaded.live) renderGrid();
+  if (id !== 'play') video.pause();
+  if (!loaded[id]) { loaded[id] = true; ({live: initLive, play: initPlay, files: initFiles, cfg: loadCfg})[id](); }
   history.replaceState(null, '', '#' + id);
 }
+
+// ======================= LIVE VIEW =======================
+const lv = { layout: 4, page: 0, solo: null, cams: [], players: [] };
+try { lv.layout = +localStorage.getItem('lvLayout') || 4; } catch {}
+let hlsReady = null;
+function loadHls() {
+  if (!hlsReady) hlsReady = new Promise(res => {
+    const s = document.createElement('script'); s.src = '/hls.js';
+    s.onload = res; s.onerror = res; document.head.appendChild(s);
+  });
+  return hlsReady;
+}
+async function refreshLiveCams() {
+  lv.cams = await api('/api/livecams').catch(() => lv.cams);
+  document.querySelectorAll('.tile[data-cam]').forEach(t => {
+    const c = lv.cams.find(c => c.name === t.dataset.cam);
+    t.querySelector('.dot').classList.toggle('ok', !!(c && c.live));
+  });
+}
+async function initLive() {
+  await Promise.all([loadHls(), refreshLiveCams()]);
+  renderGrid();
+}
+function stopLive() {
+  lv.players.forEach(p => { clearTimeout(p.retry); if (p.hls) p.hls.destroy(); p.video.removeAttribute('src'); p.video.load(); });
+  lv.players = [];
+}
+function renderGrid() {
+  stopLive();
+  const n = lv.solo ? 1 : lv.layout, cols = Math.sqrt(n);
+  const pages = Math.max(1, Math.ceil(lv.cams.length / n));
+  if (lv.page >= pages) lv.page = pages - 1;
+  const list = lv.solo ? [lv.solo] : lv.cams.slice(lv.page * n, lv.page * n + n).map(c => c.name);
+  const grid = $('#grid');
+  grid.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
+  grid.innerHTML = '';
+  for (let i = 0; i < n; i++) {
+    const cam = list[i];
+    const t = document.createElement('div');
+    if (!cam) { t.className = 'tile empty'; t.innerHTML = '<div class="msg">—</div>'; grid.appendChild(t); continue; }
+    const c = lv.cams.find(c => c.name === cam);
+    t.className = 'tile'; t.dataset.cam = cam;
+    t.innerHTML = `<video muted autoplay playsinline></video>
+      <div class="lbl"><span class="dot ${c && c.live ? 'ok' : ''}"></span>${esc(cam)}</div>
+      <div class="msg">Menyambung…</div>`;
+    grid.appendChild(t);
+    attach(t, cam);
+  }
+  if (!lv.cams.length) grid.innerHTML = '<div class="tile empty" style="grid-column:1/-1"><div class="msg">Belum ada kamera. Tambahkan di tab Pengaturan.</div></div>';
+  $('#lvPage').textContent = lv.solo ? 'perbesar' : (lv.page + 1) + '/' + pages;
+  document.querySelectorAll('#lvLayouts button').forEach(b => b.classList.toggle('on', !lv.solo && +b.dataset.l === lv.layout));
+}
+function attach(tile, cam) {
+  const v = tile.querySelector('video'), msg = tile.querySelector('.msg');
+  const p = { video: v, hls: null, retry: null };
+  lv.players.push(p);
+  const url = '/live/' + encodeURIComponent(cam) + '/index.m3u8';
+  const again = text => {
+    msg.style.display = 'flex'; msg.textContent = text;
+    if (p.hls) { p.hls.destroy(); p.hls = null; }
+    clearTimeout(p.retry);
+    p.retry = setTimeout(() => { if (lv.players.includes(p)) start(); }, 5000);
+  };
+  const start = () => {
+    if (window.Hls && Hls.isSupported()) {
+      p.hls = new Hls({ liveSyncDurationCount: 2, maxBufferLength: 8, backBufferLength: 0, enableWorker: true });
+      p.hls.on(Hls.Events.ERROR, (e, d) => { if (d.fatal) again('Tidak ada sinyal — mencoba lagi…'); });
+      p.hls.loadSource(url); p.hls.attachMedia(v);
+    } else if (v.canPlayType('application/vnd.apple.mpegurl')) {
+      v.src = url;
+    } else { msg.textContent = 'Browser tidak mendukung live view'; return; }
+    v.play().catch(() => {});
+  };
+  v.addEventListener('playing', () => msg.style.display = 'none');
+  v.addEventListener('error', () => again('Tidak ada sinyal — mencoba lagi…'));
+  start();
+}
+$('#lvLayouts').onclick = e => {
+  const b = e.target.closest('[data-l]'); if (!b) return;
+  lv.layout = +b.dataset.l; lv.solo = null; lv.page = 0;
+  try { localStorage.setItem('lvLayout', lv.layout); } catch {}
+  renderGrid();
+};
+$('#lvPrev').onclick = () => { lv.solo = null; lv.page = Math.max(0, lv.page - 1); renderGrid(); };
+$('#lvNext').onclick = () => { lv.solo = null; lv.page++; renderGrid(); };
+$('#grid').addEventListener('dblclick', e => {
+  const t = e.target.closest('.tile[data-cam]'); if (!t) return;
+  lv.solo = lv.solo ? null : t.dataset.cam; renderGrid();
+});
+$('#lvFull').onclick = () => { const g = $('#grid'); (g.requestFullscreen || g.webkitRequestFullscreen).call(g); };
+let lvTick = 0;
+setInterval(() => {
+  $('#lvClock').textContent = new Date().toLocaleString('id-ID', {dateStyle:'medium', timeStyle:'medium'});
+  if (++lvTick % 5 === 0 && $('#live').classList.contains('on')) refreshLiveCams();
+}, 1000);
 document.querySelectorAll('nav button').forEach(b => b.onclick = () => showTab(b.dataset.tab));
 
 // ======================= PLAYBACK =======================
@@ -476,7 +605,7 @@ async function status() {
   } catch {}
 }
 
-showTab(['play','files','cfg'].includes(location.hash.slice(1)) ? location.hash.slice(1) : 'play');
+showTab(['live','play','files','cfg'].includes(location.hash.slice(1)) ? location.hash.slice(1) : 'live');
 status(); setInterval(status, 5000);
 </script>
 </body>

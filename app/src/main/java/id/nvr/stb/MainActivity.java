@@ -2,6 +2,7 @@ package id.nvr.stb;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.Intent;
 import android.graphics.Color;
 import android.os.Bundle;
 import android.os.Handler;
@@ -32,6 +33,7 @@ public class MainActivity extends Activity {
     private EditText etCams, etPath, etSeg, etMinFree, etDays, etPort, etPass;
     private CheckBox cbAudio, cbWeb;
     private TextView tvStatus, tvWeb;
+    private Button btLiveRef;
     private final Handler handler = new Handler();
 
     private final Runnable refresher = new Runnable() {
@@ -52,6 +54,21 @@ public class MainActivity extends Activity {
         root.setPadding(pad, pad, pad, pad);
 
         title(root, "STB NVR — Perekam CCTV 24/7");
+
+        // ---- Live view ----
+        LinearLayout liveRow = new LinearLayout(this);
+        Button btLive = new Button(this);
+        btLive.setText("📺  LIVE VIEW");
+        btLive.setTextSize(20);
+        btLive.setOnClickListener(v -> startActivity(new Intent(this, LiveActivity.class)));
+        liveRow.addView(btLive);
+        final CheckBox cbLiveBoot = new CheckBox(this);
+        cbLiveBoot.setText("Tampilkan live view saat box menyala");
+        cbLiveBoot.setChecked(cfg.isLiveOnBoot());
+        cbLiveBoot.setOnCheckedChangeListener((v, on) -> cfg.setLiveOnBoot(on));
+        liveRow.addView(cbLiveBoot);
+        root.addView(liveRow, full());
+        btLiveRef = btLive;
 
         // ---- Web server (paling atas, supaya alamatnya langsung terlihat) ----
         tvWeb = new TextView(this);
@@ -138,7 +155,7 @@ public class MainActivity extends Activity {
             if (!c.isEmpty()) etPath.setText(c.get(c.size() - 1));
         }
         RecorderService.start(this);   // nyalakan web server (dan rekaman jika aktif)
-        btStart.requestFocus();
+        (cfg.isEnabled() ? btLiveRef : btStart).requestFocus();
     }
 
     @Override protected void onResume() { super.onResume(); handler.post(refresher); }

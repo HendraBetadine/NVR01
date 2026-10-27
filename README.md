@@ -34,6 +34,18 @@ jalan otomatis saat box menyala, dan hapus rekaman terlama saat disk hampir penu
 Rekaman tersimpan di `<folder>/<nama kamera>/nama_YYYYMMDD_HHMMSS.mkv`. Putar dengan VLC.
 Kalau kamera gagal tersambung, lihat `ffmpeg.log` di folder kamera tersebut.
 
+## Live view (seperti NVR)
+
+**Di TV (HDMI):** tekan **📺 LIVE VIEW** di aplikasi, atau centang *Tampilkan live view saat box menyala*.
+Remote: panah = pilih kamera · OK = perbesar/kembali · tombol 1/4/9/6 = layout 1/4/9/16 ·
+CH+/CH− = halaman berikutnya · Back = keluar.
+
+**Di browser:** tab **Live** — layout 1/4/9/16, klik dua kali kamera untuk memperbesar, tombol layar penuh.
+
+Catatan: live view memakai stream yang sama dengan perekaman (1 koneksi per kamera), jadi
+perekaman harus aktif. Jeda ±4–6 detik. Formuler Z+ realistis 4 kamera sekaligus di TV
+(keterbatasan hardware decoder); di browser tergantung PC/HP.
+
 ## D. Web server (upload / download file dari PC atau HP)
 
 Aktif otomatis. Alamatnya tampil di bagian atas layar aplikasi, misalnya `http://192.168.1.50:8080`.

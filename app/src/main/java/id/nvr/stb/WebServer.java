@@ -134,7 +134,9 @@ public class WebServer {
                 }
             }
 
-            if (!authorized(r)) {
+            // Live view di layar TV STB mengakses lewat 127.0.0.1 -> tidak perlu password.
+            boolean local = sock.getInetAddress() != null && sock.getInetAddress().isLoopbackAddress();
+            if (!local && !authorized(r)) {
                 send(r, 401, "text/plain; charset=utf-8", "Butuh password".getBytes("UTF-8"),
                         "WWW-Authenticate: Basic realm=\"STB NVR\"\r\n");
                 return;
@@ -163,7 +165,12 @@ public class WebServer {
 
     private void route(Req r) throws IOException {
         String m = r.method, p = r.path;
-        if (m.equals("GET") && (p.equals("/") || p.equals("/index.html"))) { serveIndex(r); return; }
+        if (m.equals("GET") && (p.equals("/") || p.equals("/index.html"))) {
+            serveAsset(r, "index.html", "text/html; charset=utf-8", "Cache-Control: no-cache\r\n"); return; }
+        if (m.equals("GET") && p.equals("/hls.js")) {
+            serveAsset(r, "hls.light.min.js", "application/javascript", "Cache-Control: max-age=86400\r\n"); return; }
+        if (m.equals("GET") && p.startsWith("/live/")) { live(r); return; }
+        if (m.equals("GET") && p.equals("/api/livecams")) { liveCams(r); return; }
         if (m.equals("GET") && p.equals("/api/roots")) { apiRoots(r); return; }
         if (m.equals("GET") && p.equals("/api/list")) { apiList(r); return; }
         if (m.equals("GET") && p.equals("/api/status")) { apiStatus(r); return; }
@@ -182,14 +189,54 @@ public class WebServer {
     }
 
     // ---- Halaman utama ----
-    private void serveIndex(Req r) throws IOException {
-        InputStream is = ctx.getAssets().open("index.html");
+    private void serveAsset(Req r, String name, String type, String extra) throws IOException {
+        InputStream is = ctx.getAssets().open(name);
         ByteArrayOutputStream bos = new ByteArrayOutputStream();
         byte[] b = new byte[8192];
         int n;
         while ((n = is.read(b)) > 0) bos.write(b, 0, n);
         is.close();
-        send(r, 200, "text/html; charset=utf-8", bos.toByteArray(), "Cache-Control: no-cache\r\n");
+        send(r, 200, type, bos.toByteArray(), extra);
+    }
+
+    // ---- Live view (HLS yang ditulis ffmpeg perekam ke <folder rekaman>/.live/<kamera>/) ----
+    private void live(Req r) throws IOException {
+        String[] seg = r.path.split("/");          // "", "live", cam, file
+        File root = recRoot();
+        if (seg.length != 4 || root == null) { json(r, 404, "{\"error\":\"tidak ada\"}"); return; }
+        String cam = new File(seg[2]).getName(), file = new File(seg[3]).getName();
+        if (cam.startsWith(".") || !(file.endsWith(".m3u8") || file.endsWith(".ts"))) {
+            json(r, 404, "{\"error\":\"tidak ada\"}"); return;
+        }
+        File f = new File(new File(new File(root, ".live"), cam), file);
+        if (!f.isFile()) { json(r, 404, "{\"error\":\"live belum tersedia\"}"); return; }
+        byte[] body;
+        RandomAccessFile raf = new RandomAccessFile(f, "r");
+        try {
+            body = new byte[(int) raf.length()];
+            raf.readFully(body);
+        } finally {
+            raf.close();
+        }
+        send(r, 200, file.endsWith(".m3u8") ? "application/vnd.apple.mpegurl" : "video/mp2t", body,
+                "Cache-Control: no-cache\r\nAccess-Control-Allow-Origin: *\r\n");
+    }
+
+    /** Kamera dari pengaturan + apakah stream live-nya sedang tersedia. */
+    private void liveCams(Req r) throws IOException {
+        Config c = new Config(ctx);
+        File root = recRoot();
+        StringBuilder sb = new StringBuilder("[");
+        for (Config.Camera cam : c.getCameras()) {
+            File m3u8 = root == null ? null : new File(new File(new File(root, ".live"), cam.name), "index.m3u8");
+            boolean on = m3u8 != null && m3u8.isFile() && System.currentTimeMillis() - m3u8.lastModified() < 20_000;
+            String st = RecorderService.STATUS.get(cam.name);
+            if (sb.length() > 1) sb.append(',');
+            sb.append("{\"name\":").append(js(cam.name))
+              .append(",\"live\":").append(on)
+              .append(",\"status\":").append(js(st == null ? "" : st)).append('}');
+        }
+        json(r, 200, sb.append(']').toString());
     }
 
     // ---- API ----

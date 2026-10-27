@@ -187,7 +187,7 @@ public class RecorderService extends Service {
         running = true;
         for (Config.Camera c : cams) {
             Worker w = new Worker(c, ffmpeg.getAbsolutePath(), new File(rootDir, c.name),
-                    cfg.getSegmentMinutes(), cfg.getAudio());
+                    new File(new File(rootDir, ".live"), c.name), cfg.getSegmentMinutes(), cfg.getAudio());
             workers.add(w);
             w.start();
         }
@@ -215,15 +215,55 @@ public class RecorderService extends Service {
         private final Config.Camera cam;
         private final String ffmpeg;
         private final File dir;
+        private final File liveDir;
         private final int segMinutes;
         private final boolean audio;
         private volatile Process proc;
         private volatile boolean stop = false;
+        // Mode "tee": 1 koneksi RTSP -> file rekaman MKV + stream live HLS.
+        private boolean useTee = true;
+        private boolean triedFallback = false;
 
-        Worker(Config.Camera cam, String ffmpeg, File dir, int segMinutes, boolean audio) {
+        Worker(Config.Camera cam, String ffmpeg, File dir, File liveDir, int segMinutes, boolean audio) {
             super("cam-" + cam.name);
-            this.cam = cam; this.ffmpeg = ffmpeg; this.dir = dir;
+            this.cam = cam; this.ffmpeg = ffmpeg; this.dir = dir; this.liveDir = liveDir;
             this.segMinutes = segMinutes; this.audio = audio;
+        }
+
+        private List<String> buildCmd() {
+            List<String> cmd = new ArrayList<>(Arrays.asList(
+                    ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "warning",
+                    "-rtsp_transport", "tcp",
+                    "-timeout", "10000000",            // 10 dtk tanpa data = putus
+                    "-fflags", "+genpts",
+                    "-i", cam.url,
+                    "-map", "0:v:0"));
+            if (audio) { cmd.add("-map"); cmd.add("0:a:0?"); }
+            cmd.add("-c");
+            cmd.add("copy");
+            String mkv = new File(dir, cam.name + "_%Y%m%d_%H%M%S.mkv").getAbsolutePath();
+            if (useTee) {
+                liveDir.mkdirs();
+                File[] old = liveDir.listFiles();
+                if (old != null) for (File f : old) f.delete();
+                cmd.add("-f");
+                cmd.add("tee");
+                cmd.add("[f=segment:segment_time=" + (segMinutes * 60)
+                        + ":segment_format=matroska:segment_atclocktime=1:reset_timestamps=1:strftime=1]" + mkv
+                        + "|[f=hls:select=v:onfail=ignore:hls_time=2:hls_list_size=4"
+                        + ":hls_flags=delete_segments+temp_file]"
+                        + new File(liveDir, "index.m3u8").getAbsolutePath());
+            } else {
+                cmd.addAll(Arrays.asList(
+                        "-f", "segment",
+                        "-segment_time", String.valueOf(segMinutes * 60),
+                        "-segment_format", "matroska",
+                        "-segment_atclocktime", "1",
+                        "-reset_timestamps", "1",
+                        "-strftime", "1",
+                        mkv));
+            }
+            return cmd;
         }
 
         void shutdown() {
@@ -238,23 +278,7 @@ public class RecorderService extends Service {
             int fails = 0;
             while (!stop) {
                 dir.mkdirs();
-                List<String> cmd = new ArrayList<>(Arrays.asList(
-                        ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "warning",
-                        "-rtsp_transport", "tcp",
-                        "-timeout", "10000000",            // 10 dtk tanpa data = putus
-                        "-fflags", "+genpts",
-                        "-i", cam.url,
-                        "-map", "0:v:0"));
-                if (audio) { cmd.add("-map"); cmd.add("0:a:0?"); }
-                cmd.addAll(Arrays.asList(
-                        "-c", "copy",
-                        "-f", "segment",
-                        "-segment_time", String.valueOf(segMinutes * 60),
-                        "-segment_format", "matroska",
-                        "-segment_atclocktime", "1",
-                        "-reset_timestamps", "1",
-                        "-strftime", "1",
-                        new File(dir, cam.name + "_%Y%m%d_%H%M%S.mkv").getAbsolutePath()));
+                List<String> cmd = buildCmd();
 
                 long started = System.currentTimeMillis();
                 STATUS.put(cam.name, "Menyambung…");
@@ -263,7 +287,7 @@ public class RecorderService extends Service {
                     proc = p;
                     Thread logger = new Thread(() -> drainLog(p), "log-" + cam.name);
                     logger.start();
-                    STATUS.put(cam.name, "● Merekam");
+                    STATUS.put(cam.name, useTee ? "● Merekam" : "● Merekam (tanpa live)");
 
                     // Watchdog: kalau file terbaru tidak bertambah, matikan ffmpeg.
                     while (!stop) {
@@ -285,6 +309,12 @@ public class RecorderService extends Service {
                 // Jeda sebelum sambung ulang (5 dtk, naik sampai 60 dtk jika gagal terus)
                 boolean quickFail = System.currentTimeMillis() - started < 30_000;
                 fails = quickFail ? Math.min(fails + 1, 12) : 0;
+                // Pengaman: kalau mode live (tee) cepat gagal, coba mode rekam saja.
+                // Kalau mode rekam saja juga gagal, masalahnya di kamera -> kembali ke mode live.
+                if (quickFail) {
+                    if (useTee) { useTee = false; triedFallback = true; }
+                    else if (triedFallback) { useTee = true; triedFallback = false; }
+                }
                 long wait = 5_000L * Math.max(1, fails);
                 STATUS.put(cam.name, "✕ Putus, coba lagi " + (wait / 1000) + " dtk (lihat log)");
                 try { Thread.sleep(wait); } catch (InterruptedException ie) { break; }

@@ -44,6 +44,10 @@ public class Config {
 
     public void setEnabled(boolean on) { sp.edit().putBoolean("enabled", on).apply(); }
 
+    // ---- Live view di TV ----
+    public boolean isLiveOnBoot() { return sp.getBoolean("liveboot", false); }
+    public void setLiveOnBoot(boolean on) { sp.edit().putBoolean("liveboot", on).apply(); }
+
     // ---- Web server ----
     public boolean isWebEnabled() { return sp.getBoolean("web", true); }
     public int getWebPort() { return sp.getInt("webport", 8080); }

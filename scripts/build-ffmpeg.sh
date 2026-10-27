@@ -41,7 +41,7 @@ make distclean >/dev/null 2>&1 || true
   --enable-network \
   --enable-protocol=tcp,udp,rtp,file,pipe \
   --enable-demuxer=rtsp,rtp,sdp,matroska \
-  --enable-muxer=segment,matroska,mp4,mov \
+  --enable-muxer=segment,matroska,mp4,mov,hls,mpegts,tee \
   --enable-parser=h264,hevc,aac,mjpeg \
   --enable-decoder=h264,hevc,aac,pcm_alaw,pcm_mulaw,mjpeg \
   --enable-bsf=h264_mp4toannexb,hevc_mp4toannexb,aac_adtstoasc,extract_extradata \
