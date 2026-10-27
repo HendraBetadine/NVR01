@@ -248,7 +248,10 @@ public class RecorderService extends Service {
                     ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "warning",
                     "-rtsp_transport", "tcp",
                     "-timeout", "10000000",            // 10 dtk tanpa data = putus
-                    "-fflags", "+genpts",
+                    "-fflags", "+genpts+discardcorrupt",
+                    // Banyak kamera mengirim timestamp yang melompat mundur -> file MKV berhenti
+                    // ("non monotonically increasing dts"). Pakai waktu terima di STB, selalu maju.
+                    "-use_wallclock_as_timestamps", "1",
                     "-i", cam.url,
                     "-map", "0:v:0"));
             if (audio) { cmd.add("-map"); cmd.add("0:a:0?"); }
@@ -261,7 +264,8 @@ public class RecorderService extends Service {
                 if (old != null) for (File f : old) f.delete();
                 cmd.add("-f");
                 cmd.add("tee");
-                cmd.add("[f=segment:segment_time=" + (segMinutes * 60)
+                // onfail=abort: kalau penulis rekaman gagal, ffmpeg langsung keluar & disambung ulang
+                cmd.add("[f=segment:onfail=abort:segment_time=" + (segMinutes * 60)
                         + ":segment_format=matroska:segment_atclocktime=1:reset_timestamps=1:strftime=1]" + mkv
                         + "|[f=hls:select=v:onfail=ignore:hls_time=2:hls_list_size=4"
                         + ":hls_flags=delete_segments+temp_file]"
