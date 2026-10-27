@@ -8,8 +8,6 @@ import android.content.Intent;
 public class BootReceiver extends BroadcastReceiver {
     @Override
     public void onReceive(Context ctx, Intent intent) {
-        if (new Config(ctx).isEnabled()) {
-            RecorderService.start(ctx);
-        }
+        RecorderService.start(ctx);   // nyala jika rekaman atau web server diaktifkan
     }
 }

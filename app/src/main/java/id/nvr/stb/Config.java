@@ -44,6 +44,17 @@ public class Config {
 
     public void setEnabled(boolean on) { sp.edit().putBoolean("enabled", on).apply(); }
 
+    // ---- Web server ----
+    public boolean isWebEnabled() { return sp.getBoolean("web", true); }
+    public int getWebPort() { return sp.getInt("webport", 8080); }
+    public String getWebPassword() { return sp.getString("webpass", "admin"); }
+
+    public void saveWeb(boolean on, int port, String password) {
+        if (port < 1024 || port > 65535) port = 8080;
+        sp.edit().putBoolean("web", on).putInt("webport", port)
+                .putString("webpass", password == null ? "" : password).apply();
+    }
+
     public List<Camera> getCameras() {
         List<Camera> list = new ArrayList<>();
         int n = 1;

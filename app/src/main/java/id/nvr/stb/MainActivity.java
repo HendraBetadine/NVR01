@@ -17,20 +17,21 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import java.io.File;
-import java.io.FileOutputStream;
+import java.net.Inet4Address;
+import java.net.InetAddress;
+import java.net.NetworkInterface;
 import java.util.ArrayList;
-import java.util.LinkedHashSet;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 /** Satu layar pengaturan sederhana, bisa dioperasikan dengan remote STB. */
 public class MainActivity extends Activity {
 
     private Config cfg;
-    private EditText etCams, etPath, etSeg, etMinFree, etDays;
-    private CheckBox cbAudio;
-    private TextView tvStatus;
+    private EditText etCams, etPath, etSeg, etMinFree, etDays, etPort, etPass;
+    private CheckBox cbAudio, cbWeb;
+    private TextView tvStatus, tvWeb;
     private final Handler handler = new Handler();
 
     private final Runnable refresher = new Runnable() {
@@ -52,6 +53,33 @@ public class MainActivity extends Activity {
 
         title(root, "STB NVR — Perekam CCTV 24/7");
 
+        // ---- Web server (paling atas, supaya alamatnya langsung terlihat) ----
+        tvWeb = new TextView(this);
+        tvWeb.setTextSize(20);
+        tvWeb.setTextColor(Color.rgb(120, 200, 255));
+        root.addView(tvWeb, full());
+
+        LinearLayout webRow = new LinearLayout(this);
+        cbWeb = new CheckBox(this);
+        cbWeb.setText("Web server");
+        cbWeb.setChecked(cfg.isWebEnabled());
+        webRow.addView(cbWeb);
+        etPort = number(webRow, "Port", cfg.getWebPort());
+        LinearLayout passCol = new LinearLayout(this);
+        passCol.setOrientation(LinearLayout.VERTICAL);
+        label(passCol, "Password web (user: admin)");
+        etPass = new EditText(this);
+        etPass.setSingleLine(true);
+        etPass.setText(cfg.getWebPassword());
+        passCol.addView(etPass, full());
+        webRow.addView(passCol, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        Button btWeb = new Button(this);
+        btWeb.setText("Terapkan");
+        btWeb.setOnClickListener(v -> applyWeb());
+        webRow.addView(btWeb);
+        root.addView(webRow, full());
+
+        // ---- Kamera ----
         label(root, "Kamera (satu per baris)  format:  nama,rtsp://user:pass@ip:554/stream");
         etCams = new EditText(this);
         etCams.setMinLines(4);
@@ -90,7 +118,7 @@ public class MainActivity extends Activity {
         btStart.setText("▶  SIMPAN & MULAI REKAM");
         btStart.setOnClickListener(v -> startRec());
         Button btStop = new Button(this);
-        btStop.setText("■  STOP");
+        btStop.setText("■  STOP REKAM");
         btStop.setOnClickListener(v -> stopRec());
         btns.addView(btStart);
         btns.addView(btStop);
@@ -106,18 +134,29 @@ public class MainActivity extends Activity {
         setContentView(sv);
 
         if (cfg.getStoragePath().isEmpty()) {
-            List<String> c = findStorage();
+            List<String> c = Storage.recordingCandidates(this);
             if (!c.isEmpty()) etPath.setText(c.get(c.size() - 1));
         }
+        RecorderService.start(this);   // nyalakan web server (dan rekaman jika aktif)
         btStart.requestFocus();
     }
 
     @Override protected void onResume() { super.onResume(); handler.post(refresher); }
     @Override protected void onPause() { super.onPause(); handler.removeCallbacks(refresher); }
 
+    private void saveWeb() {
+        cfg.saveWeb(cbWeb.isChecked(), parse(etPort, 8080), etPass.getText().toString().trim());
+    }
+
+    private void applyWeb() {
+        saveWeb();
+        RecorderService.apply(this);
+        Toast.makeText(this, cfg.isWebEnabled() ? "Web server diterapkan" : "Web server dimatikan", Toast.LENGTH_SHORT).show();
+    }
+
     private void startRec() {
         String path = etPath.getText().toString().trim();
-        if (!testWrite(path)) {
+        if (!Storage.testWrite(path)) {
             Toast.makeText(this, "Folder tidak bisa ditulis. Pilih lewat \"Cari storage\".", Toast.LENGTH_LONG).show();
             return;
         }
@@ -127,21 +166,33 @@ public class MainActivity extends Activity {
             Toast.makeText(this, "Isi minimal satu kamera.", Toast.LENGTH_LONG).show();
             return;
         }
+        saveWeb();
         cfg.setEnabled(true);
-        RecorderService.stop(this);   // restart supaya pengaturan baru dipakai
-        handler.postDelayed(() -> RecorderService.start(this), 1500);
+        RecorderService.apply(this);
         Toast.makeText(this, "Mulai merekam…", Toast.LENGTH_SHORT).show();
     }
 
     private void stopRec() {
         cfg.setEnabled(false);
-        RecorderService.stop(this);
+        RecorderService.apply(this);
         Toast.makeText(this, "Perekaman dihentikan.", Toast.LENGTH_SHORT).show();
     }
 
     private void refreshStatus() {
+        // Alamat web
+        if (cfg.isWebEnabled()) {
+            String info = RecorderService.webInfo;
+            StringBuilder w = new StringBuilder();
+            for (String ip : localIps()) w.append("http://").append(ip).append(':').append(cfg.getWebPort()).append("   ");
+            tvWeb.setText(info.startsWith("Web server gagal") ? info
+                    : "Buka di browser:  " + (w.length() > 0 ? w.toString().trim() : "(belum ada jaringan)")
+                      + "\nUser: admin   Password: " + (cfg.getWebPassword().isEmpty() ? "(tanpa password)" : cfg.getWebPassword()));
+        } else {
+            tvWeb.setText("Web server mati");
+        }
+
         StringBuilder sb = new StringBuilder();
-        sb.append(RecorderService.running ? "STATUS: MEREKAM\n" : "STATUS: BERHENTI\n");
+        sb.append(RecorderService.running ? "STATUS: MEREKAM\n" : "STATUS: TIDAK MEREKAM\n");
         synchronized (RecorderService.STATUS) {
             for (Map.Entry<String, String> e : RecorderService.STATUS.entrySet()) {
                 sb.append("  ").append(e.getKey()).append(": ").append(e.getValue()).append('\n');
@@ -155,30 +206,21 @@ public class MainActivity extends Activity {
         tvStatus.setText(sb.toString());
     }
 
-    // ---- Cari folder yang bisa ditulis (USB/SD/internal) ----
-    private List<String> findStorage() {
-        Set<String> cand = new LinkedHashSet<>();
-        for (File f : getExternalFilesDirs(null)) {
-            if (f != null) cand.add(new File(f, "rekaman").getAbsolutePath());
-        }
-        String[] mounts = {"/storage", "/mnt", "/mnt/usb", "/mnt/media_rw", "/storage/external_storage", "/mnt/sda"};
-        for (String m : mounts) {
-            File[] subs = new File(m).listFiles();
-            if (subs == null) continue;
-            for (File s : subs) {
-                String n = s.getName().toLowerCase();
-                if (n.startsWith("sd") || n.startsWith("usb") || n.contains("udisk") || n.matches("[0-9a-f]{4}-[0-9a-f]{4}")) {
-                    cand.add(new File(s, "STBNVR").getAbsolutePath());
+    private static List<String> localIps() {
+        List<String> ips = new ArrayList<>();
+        try {
+            for (NetworkInterface ni : Collections.list(NetworkInterface.getNetworkInterfaces())) {
+                if (!ni.isUp() || ni.isLoopback()) continue;
+                for (InetAddress a : Collections.list(ni.getInetAddresses())) {
+                    if (a instanceof Inet4Address && !a.isLoopbackAddress()) ips.add(a.getHostAddress());
                 }
             }
-        }
-        List<String> ok = new ArrayList<>();
-        for (String c : cand) if (testWrite(c)) ok.add(c);
-        return ok;
+        } catch (Exception ignored) { }
+        return ips;
     }
 
     private void pickStorage() {
-        final List<String> list = findStorage();
+        final List<String> list = Storage.recordingCandidates(this);
         if (list.isEmpty()) {
             Toast.makeText(this, "Tidak ada storage yang bisa ditulis. Cek HDD/flashdisk.", Toast.LENGTH_LONG).show();
             return;
@@ -192,21 +234,6 @@ public class MainActivity extends Activity {
                 .setTitle("Pilih folder rekaman")
                 .setItems(items, (d, w) -> etPath.setText(list.get(w)))
                 .show();
-    }
-
-    private static boolean testWrite(String path) {
-        if (path == null || path.isEmpty()) return false;
-        try {
-            File dir = new File(path);
-            if (!dir.isDirectory() && !dir.mkdirs()) return false;
-            File t = new File(dir, ".test");
-            FileOutputStream o = new FileOutputStream(t);
-            o.write(1);
-            o.close();
-            return t.delete();
-        } catch (Exception e) {
-            return false;
-        }
     }
 
     // ---- helper UI ----

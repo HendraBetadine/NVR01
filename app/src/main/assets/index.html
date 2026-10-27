@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>STB NVR</title>
+<style>
+  :root { --bg:#111418; --panel:#1a1f26; --line:#2a313b; --text:#e6e9ee; --mute:#8a94a3;
+          --acc:#4fb3ff; --ok:#3ecf8e; --bad:#ff6b6b; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text);
+         font:15px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+  header { display:flex; flex-wrap:wrap; gap:10px; align-items:center; justify-content:space-between;
+           padding:14px 16px; border-bottom:1px solid var(--line); background:var(--panel); }
+  h1 { margin:0; font-size:18px; letter-spacing:.3px; }
+  #cams { display:flex; flex-wrap:wrap; gap:6px; }
+  .pill { padding:3px 10px; border-radius:99px; background:#232a33; font-size:13px; color:var(--mute); }
+  .pill.ok { color:var(--ok); } .pill.bad { color:var(--bad); }
+  main { max-width:1000px; margin:0 auto; padding:16px; }
+  .bar { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-bottom:12px; }
+  select, button { font:inherit; color:var(--text); background:#232a33; border:1px solid var(--line);
+                   border-radius:8px; padding:8px 12px; cursor:pointer; }
+  button:hover, select:hover { border-color:var(--acc); }
+  button.primary { background:var(--acc); border-color:var(--acc); color:#06121c; font-weight:600; }
+  #crumbs { flex:1; min-width:200px; color:var(--mute); overflow-wrap:anywhere; }
+  #crumbs a { color:var(--acc); text-decoration:none; cursor:pointer; }
+  #free { color:var(--mute); font-size:13px; }
+  table { width:100%; border-collapse:collapse; background:var(--panel); border-radius:10px; overflow:hidden; }
+  th, td { padding:9px 12px; border-bottom:1px solid var(--line); text-align:left; }
+  th { color:var(--mute); font-weight:500; font-size:13px; }
+  td.n { overflow-wrap:anywhere; }
+  td.s, td.t { color:var(--mute); white-space:nowrap; font-size:13px; }
+  td a { color:var(--text); text-decoration:none; }
+  td a.dir { color:var(--acc); font-weight:600; }
+  .x { background:none; border:none; color:var(--mute); padding:4px 8px; }
+  .x:hover { color:var(--bad); }
+  #queue { margin-bottom:12px; display:grid; gap:6px; }
+  .up { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:8px 12px; font-size:13px; }
+  .up .row { display:flex; justify-content:space-between; gap:8px; }
+  .up progress { width:100%; height:6px; margin-top:6px; accent-color:var(--acc); }
+  #drop { position:fixed; inset:0; background:rgba(79,179,255,.15); border:3px dashed var(--acc);
+          display:none; align-items:center; justify-content:center; font-size:22px; z-index:9; }
+  .empty { padding:24px; text-align:center; color:var(--mute); }
+  @media (max-width:600px) { td.t, th.t { display:none; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>📹 STB NVR</h1>
+  <div id="cams"><span class="pill">memuat…</span></div>
+</header>
+<main>
+  <div class="bar">
+    <select id="root" title="Lokasi"></select>
+    <div id="crumbs"></div>
+    <span id="free"></span>
+  </div>
+  <div class="bar">
+    <button class="primary" id="btnUp">⬆ Upload file</button>
+    <button id="btnDir">＋ Folder baru</button>
+    <button id="btnRef">⟳ Muat ulang</button>
+    <input type="file" id="file" multiple hidden>
+  </div>
+  <div id="queue"></div>
+  <table>
+    <thead><tr><th>Nama</th><th>Ukuran</th><th class="t">Diubah</th><th></th></tr></thead>
+    <tbody id="list"></tbody>
+  </table>
+</main>
+<div id="drop">Lepaskan file untuk upload</div>
+
+<script>
+const $ = s => document.querySelector(s);
+let roots = [], root = '', path = '';
+
+const fmtSize = b => {
+  if (b < 1024) return b + ' B';
+  const u = ['KB','MB','GB','TB']; let i = -1;
+  do { b /= 1024; i++; } while (b >= 1024 && i < u.length - 1);
+  return b.toFixed(b < 10 ? 1 : 0) + ' ' + u[i];
+};
+const fmtDate = t => new Date(t).toLocaleString('id-ID', {dateStyle:'short', timeStyle:'short'});
+const q = o => Object.entries(o).map(([k,v]) => k + '=' + encodeURIComponent(v)).join('&');
+const esc = s => s.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+async function api(url, opt) {
+  const r = await fetch(url, opt);
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
+  return j;
+}
+
+async function loadRoots() {
+  roots = await api('/api/roots');
+  const sel = $('#root');
+  sel.innerHTML = roots.map(r =>
+    `<option value="${esc(r.name)}">${esc(r.name)} — ${fmtSize(r.free)} kosong</option>`).join('');
+  const saved = location.hash.slice(1).split('|');
+  if (saved[0] && roots.some(r => r.name === decodeURIComponent(saved[0]))) {
+    root = decodeURIComponent(saved[0]); path = decodeURIComponent(saved[1] || '');
+  } else { root = roots.length ? roots[0].name : ''; path = ''; }
+  sel.value = root;
+}
+
+async function load() {
+  location.hash = encodeURIComponent(root) + '|' + encodeURIComponent(path);
+  const crumbs = [`<a data-p="">${esc(root)}</a>`];
+  let acc = '';
+  path.split('/').filter(Boolean).forEach(seg => {
+    acc += (acc ? '/' : '') + seg;
+    crumbs.push(`<a data-p="${esc(acc)}">${esc(seg)}</a>`);
+  });
+  $('#crumbs').innerHTML = crumbs.join(' / ');
+  const tb = $('#list');
+  try {
+    const d = await api('/api/list?' + q({root, path}));
+    $('#free').textContent = fmtSize(d.free) + ' kosong' + (d.writable ? '' : ' · hanya-baca');
+    const rows = [];
+    if (path) rows.push(`<tr><td class="n" colspan="4"><a class="dir" data-p="${esc(path.split('/').slice(0,-1).join('/'))}">⬑ ..</a></td></tr>`);
+    d.items.forEach(it => {
+      const p = (path ? path + '/' : '') + it.n;
+      const name = it.d
+        ? `<a class="dir" data-p="${esc(p)}">📁 ${esc(it.n)}</a>`
+        : `<a href="/dl?${q({root, path:p})}">📄 ${esc(it.n)}</a>`;
+      rows.push(`<tr><td class="n">${name}</td><td class="s">${it.d ? '' : fmtSize(it.s)}</td>` +
+        `<td class="t">${fmtDate(it.t)}</td><td><button class="x" data-del="${esc(p)}" title="Hapus">✕</button></td></tr>`);
+    });
+    tb.innerHTML = rows.join('') || '<tr><td colspan="4" class="empty">Folder kosong</td></tr>';
+    if (!d.items.length && path) tb.innerHTML = rows[0] + '<tr><td colspan="4" class="empty">Folder kosong</td></tr>';
+  } catch (e) {
+    tb.innerHTML = `<tr><td colspan="4" class="empty">${esc(e.message)}</td></tr>`;
+  }
+}
+
+$('#list').addEventListener('click', async e => {
+  const a = e.target.closest('[data-p]');
+  if (a) { path = a.dataset.p; load(); return; }
+  const del = e.target.closest('[data-del]');
+  if (del && confirm('Hapus "' + del.dataset.del + '"?')) {
+    try { await api('/api/delete?' + q({root, path:del.dataset.del}), {method:'POST'}); }
+    catch (err) { alert(err.message); }
+    load();
+  }
+});
+$('#crumbs').addEventListener('click', e => {
+  const a = e.target.closest('[data-p]');
+  if (a) { path = a.dataset.p; load(); }
+});
+$('#root').addEventListener('change', e => { root = e.target.value; path = ''; load(); });
+$('#btnRef').onclick = () => { loadRoots().then(load); };
+$('#btnDir').onclick = async () => {
+  const name = prompt('Nama folder baru:');
+  if (!name) return;
+  try { await api('/api/mkdir?' + q({root, path, name}), {method:'POST'}); } catch (e) { alert(e.message); }
+  load();
+};
+
+// ---- Upload: satu per satu, body = isi file (streaming, tanpa batas ukuran) ----
+const pending = [];
+let busy = false;
+$('#btnUp').onclick = () => $('#file').click();
+$('#file').onchange = e => { addFiles(e.target.files); e.target.value = ''; };
+
+function addFiles(files) {
+  for (const f of files) {
+    const el = document.createElement('div');
+    el.className = 'up';
+    el.innerHTML = `<div class="row"><span>${esc(f.name)}</span><span class="st">menunggu</span></div><progress max="100" value="0"></progress>`;
+    $('#queue').appendChild(el);
+    pending.push({f, el, root, path});
+  }
+  next();
+}
+
+function next() {
+  if (busy || !pending.length) return;
+  busy = true;
+  const {f, el, root: r, path: p} = pending.shift();
+  const st = el.querySelector('.st'), pr = el.querySelector('progress');
+  const xhr = new XMLHttpRequest();
+  const t0 = Date.now();
+  xhr.open('PUT', '/api/upload?' + q({root:r, path:p, name:f.name}));
+  xhr.upload.onprogress = ev => {
+    if (!ev.lengthComputable) return;
+    pr.value = ev.loaded / ev.total * 100;
+    const sec = (Date.now() - t0) / 1000;
+    st.textContent = Math.floor(pr.value) + '% · ' + fmtSize(ev.loaded / Math.max(sec, .1)) + '/s';
+  };
+  xhr.onload = () => {
+    let msg = 'selesai ✓';
+    if (xhr.status !== 200) { try { msg = '✕ ' + JSON.parse(xhr.responseText).error; } catch { msg = '✕ HTTP ' + xhr.status; } }
+    st.textContent = msg;
+    if (xhr.status === 200) setTimeout(() => el.remove(), 4000);
+    done(r, p);
+  };
+  xhr.onerror = () => { st.textContent = '✕ koneksi terputus'; done(r, p); };
+  xhr.send(f);
+}
+function done(r, p) { busy = false; if (r === root && p === path) load(); next(); }
+
+// Drag & drop
+let dragDepth = 0;
+addEventListener('dragenter', e => { e.preventDefault(); dragDepth++; $('#drop').style.display = 'flex'; });
+addEventListener('dragleave', () => { if (--dragDepth <= 0) { dragDepth = 0; $('#drop').style.display = 'none'; } });
+addEventListener('dragover', e => e.preventDefault());
+addEventListener('drop', e => {
+  e.preventDefault(); dragDepth = 0; $('#drop').style.display = 'none';
+  if (e.dataTransfer.files.length) addFiles(e.dataTransfer.files);
+});
+addEventListener('beforeunload', e => { if (busy || pending.length) { e.preventDefault(); e.returnValue = ''; } });
+
+// Status kamera
+async function status() {
+  try {
+    const s = await api('/api/status');
+    const pills = [`<span class="pill ${s.recording ? 'ok' : ''}">${s.recording ? '● Merekam' : 'Tidak merekam'}</span>`];
+    s.cams.forEach(c => pills.push(
+      `<span class="pill ${c.status.includes('Merekam') ? 'ok' : (c.status.includes('✕') || c.name === 'ERROR' ? 'bad' : '')}">${esc(c.name)}: ${esc(c.status)}</span>`));
+    $('#cams').innerHTML = pills.join('');
+  } catch {}
+}
+
+loadRoots().then(load);
+status(); setInterval(status, 5000);
+</script>
+</body>
+</html>

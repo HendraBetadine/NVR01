@@ -47,21 +47,39 @@ public class RecorderService extends Service {
     public static final Map<String, String> STATUS = Collections.synchronizedMap(new LinkedHashMap<String, String>());
     public static volatile boolean running = false;
 
+    public static volatile String webInfo = "";
+
+    private static final String ACTION_APPLY = "id.nvr.stb.APPLY";
+
     private final List<Worker> workers = new ArrayList<>();
     private Thread cleaner;
+    private WebServer web;
     private PowerManager.WakeLock wakeLock;
     private WifiManager.WifiLock wifiLock;
 
+    /** Nyalakan service (dipanggil saat boot / alarm penjaga). Tidak me-restart yang sudah jalan. */
     public static void start(Context ctx) {
-        Intent i = new Intent(ctx, RecorderService.class);
-        if (Build.VERSION.SDK_INT >= 26) ctx.startForegroundService(i);
-        else ctx.startService(i);
+        Config cfg = new Config(ctx);
+        if (!cfg.isEnabled() && !cfg.isWebEnabled()) return;
+        launch(ctx, new Intent(ctx, RecorderService.class));
         scheduleKeepAlive(ctx);
     }
 
-    public static void stop(Context ctx) {
-        cancelKeepAlive(ctx);
-        ctx.stopService(new Intent(ctx, RecorderService.class));
+    /** Terapkan pengaturan terbaru (rekaman & web server) — dipanggil dari layar pengaturan. */
+    public static void apply(Context ctx) {
+        Config cfg = new Config(ctx);
+        if (!cfg.isEnabled() && !cfg.isWebEnabled()) {
+            cancelKeepAlive(ctx);
+            ctx.stopService(new Intent(ctx, RecorderService.class));
+            return;
+        }
+        launch(ctx, new Intent(ctx, RecorderService.class).setAction(ACTION_APPLY));
+        scheduleKeepAlive(ctx);
+    }
+
+    private static void launch(Context ctx, Intent i) {
+        if (Build.VERSION.SDK_INT >= 26) ctx.startForegroundService(i);
+        else ctx.startService(i);
     }
 
     // ---- Alarm penjaga: tiap 15 menit memastikan service tetap hidup ----
@@ -109,12 +127,44 @@ public class RecorderService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        if (!running) startRecording();
+        Config cfg = new Config(this);
+        boolean applyNow = intent != null && ACTION_APPLY.equals(intent.getAction());
+
+        // --- Rekaman ---
+        if (applyNow) stopRecording();
+        if (cfg.isEnabled() && !running) startRecording(cfg);
+        if (!cfg.isEnabled() && running) stopRecording();
+
+        // --- Web server ---
+        boolean webChanged = web != null
+                && (web.getPort() != cfg.getWebPort() || !web.getPassword().equals(cfg.getWebPassword()));
+        if (web != null && (!cfg.isWebEnabled() || webChanged)) { web.stop(); web = null; webInfo = ""; }
+        if (cfg.isWebEnabled() && web == null) {
+            try {
+                WebServer w = new WebServer(this, cfg.getWebPort(), cfg.getWebPassword());
+                w.start();
+                web = w;
+                webInfo = "Web server aktif di port " + cfg.getWebPort();
+            } catch (Exception e) {
+                webInfo = "Web server gagal: " + e.getMessage();
+            }
+        }
+
+        if (!cfg.isEnabled() && !cfg.isWebEnabled()) { stopSelf(); return START_NOT_STICKY; }
+        updateNotification((running ? "Merekam" : "Tidak merekam")
+                + (web != null ? " · web :" + cfg.getWebPort() : ""));
         return START_STICKY;   // dihidupkan ulang sistem jika ter-kill
     }
 
-    private void startRecording() {
-        Config cfg = new Config(this);
+    private void stopRecording() {
+        running = false;
+        for (Worker w : workers) w.shutdown();
+        workers.clear();
+        if (cleaner != null) { cleaner.interrupt(); cleaner = null; }
+        STATUS.clear();
+    }
+
+    private void startRecording(final Config cfg) {
         File ffmpeg = new File(getApplicationInfo().nativeLibraryDir, "libffmpeg.so");
         STATUS.clear();
 
@@ -143,18 +193,15 @@ public class RecorderService extends Service {
         }
         cleaner = new Thread(() -> cleanupLoop(rootDir, cfg.getMinFreeGb(), cfg.getRetentionDays()), "cleaner");
         cleaner.start();
-        updateNotification(cams.size() + " kamera merekam → " + root);
     }
 
     @Override
     public void onDestroy() {
-        running = false;
-        for (Worker w : workers) w.shutdown();
-        workers.clear();
-        if (cleaner != null) cleaner.interrupt();
+        stopRecording();
+        if (web != null) { web.stop(); web = null; }
+        webInfo = "";
         if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
         if (wifiLock != null && wifiLock.isHeld()) wifiLock.release();
-        STATUS.clear();
         super.onDestroy();
     }
 
@@ -242,7 +289,6 @@ public class RecorderService extends Service {
                 STATUS.put(cam.name, "✕ Putus, coba lagi " + (wait / 1000) + " dtk (lihat log)");
                 try { Thread.sleep(wait); } catch (InterruptedException ie) { break; }
             }
-            STATUS.put(cam.name, "Berhenti");
         }
 
         /** Simpan output ffmpeg ke <folder kamera>/ffmpeg.log (maks ~256 KB). */

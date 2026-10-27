@@ -34,6 +34,17 @@ jalan otomatis saat box menyala, dan hapus rekaman terlama saat disk hampir penu
 Rekaman tersimpan di `<folder>/<nama kamera>/nama_YYYYMMDD_HHMMSS.mkv`. Putar dengan VLC.
 Kalau kamera gagal tersambung, lihat `ffmpeg.log` di folder kamera tersebut.
 
+## D. Web server (upload / download file dari PC atau HP)
+
+Aktif otomatis. Alamatnya tampil di bagian atas layar aplikasi, misalnya `http://192.168.1.50:8080`.
+
+- Login: user **admin**, password default **admin** — ganti di layar aplikasi lalu tekan **Terapkan**.
+- Pilih lokasi (Rekaman / Internal / USB), lalu upload (tombol atau drag & drop), download, buat folder, hapus.
+- Upload ditulis langsung ke disk, jadi file besar (GB) tetap aman. Download mendukung resume.
+- Status perekaman kamera juga tampil di halaman ini.
+- Hanya untuk jaringan lokal. **Jangan** di-port-forward ke internet tanpa VPN.
+- Jangan simpan file `.mkv` pribadi di dalam folder kamera — folder itu ikut dibersihkan otomatis.
+
 ### URL RTSP umum (pakai substream supaya ringan)
 | Merek | Substream |
 |---|---|
