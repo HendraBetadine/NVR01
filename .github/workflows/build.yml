@@ -8,6 +8,39 @@ permissions:
   contents: write
 
 jobs:
+  # Uji klien Let's Encrypt (ACME) terhadap Pebble, server uji resmi Let's Encrypt.
+  acme-test:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Jalankan Pebble
+        run: |
+          git clone --depth 1 https://github.com/letsencrypt/pebble.git /tmp/pebble
+          cd /tmp/pebble
+          go build -o /tmp/pebble-bin ./cmd/pebble
+          go build -o /tmp/challtestsrv ./cmd/pebble-challtestsrv
+          # DNS uji: semua domain -> 127.0.0.1 (port 5002 dipakai klien kita, bukan challtestsrv)
+          /tmp/challtestsrv -defaultIPv4 127.0.0.1 -defaultIPv6 "" -http01 "" -https01 "" -tlsalpn01 "" > /tmp/challtestsrv.log 2>&1 &
+          PEBBLE_VA_NOSLEEP=1 /tmp/pebble-bin -config test/config/pebble-config.json -dnsserver 127.0.0.1:8053 > /tmp/pebble.log 2>&1 &
+          sleep 5
+          cat /tmp/pebble.log
+      - name: Uji klien ACME
+        run: |
+          mkdir -p /tmp/out
+          javac -d /tmp/out app/src/main/java/id/nvr/stb/Acme.java app/src/main/java/id/nvr/stb/Json.java ci/AcmeIT.java
+          java -cp /tmp/out id.nvr.stb.AcmeIT /tmp/pebble/test/certs/pebble.minica.pem
+      - name: Log Pebble (jika gagal)
+        if: failure()
+        run: tail -50 /tmp/pebble.log; tail -20 /tmp/challtestsrv.log
+
   build:
     runs-on: ubuntu-22.04
     steps:
