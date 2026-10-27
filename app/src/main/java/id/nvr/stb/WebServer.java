@@ -55,17 +55,32 @@ public class WebServer {
     private ExecutorService pool;
     private volatile boolean running;
 
-    public WebServer(Context ctx, int port, String password) {
+    private final javax.net.ssl.SSLServerSocketFactory ssl;   // null = HTTP biasa
+
+    public WebServer(Context ctx, int port, String password) { this(ctx, port, password, null); }
+
+    public WebServer(Context ctx, int port, String password, javax.net.ssl.SSLServerSocketFactory ssl) {
         this.ctx = ctx.getApplicationContext();
         this.port = port;
         this.password = password == null ? "" : password;
+        this.ssl = ssl;
     }
 
     public int getPort() { return port; }
     public String getPassword() { return password; }
+    public boolean isSecure() { return ssl != null; }
 
     public void start() throws IOException {
-        server = new ServerSocket();
+        if (ssl != null) {
+            javax.net.ssl.SSLServerSocket s = (javax.net.ssl.SSLServerSocket) ssl.createServerSocket();
+            // Hanya TLS 1.2 / 1.3
+            List<String> protos = new ArrayList<>();
+            for (String p : s.getSupportedProtocols()) if (p.equals("TLSv1.2") || p.equals("TLSv1.3")) protos.add(p);
+            if (!protos.isEmpty()) s.setEnabledProtocols(protos.toArray(new String[0]));
+            server = s;
+        } else {
+            server = new ServerSocket();
+        }
         server.setReuseAddress(true);
         server.bind(new InetSocketAddress(port));
         pool = Executors.newFixedThreadPool(8);
@@ -135,11 +150,24 @@ public class WebServer {
                 }
             }
 
+            // Validasi Let's Encrypt (HTTP-01): harus bisa diakses tanpa password.
+            if (r.path.startsWith("/.well-known/acme-challenge/")) {
+                String ka = Acme.CHALLENGES.get(r.path.substring("/.well-known/acme-challenge/".length()));
+                send(r, ka == null ? 404 : 200, "text/plain", (ka == null ? "" : ka).getBytes("UTF-8"), null);
+                return;
+            }
+
             // Live view di layar TV STB mengakses lewat 127.0.0.1 -> tidak perlu password.
             InetAddress peer = sock.getInetAddress();
             boolean local = peer != null && peer.isLoopbackAddress() && r.headers.get("x-forwarded-for") == null;
             if (!local) {
                 String client = clientIp(peer, r);
+                // Akses dari internet lewat HTTP biasa -> alihkan ke HTTPS jika sudah aktif.
+                String dom = RecorderService.httpsDomain;
+                if (ssl == null && RecorderService.httpsActive && !dom.isEmpty() && !isLan(client)) {
+                    send(r, 301, "text/plain", new byte[0], "Location: https://" + dom + target + "\r\n");
+                    return;
+                }
                 if (isBlocked(client)) {
                     send(r, 429, "text/plain; charset=utf-8",
                             "Terlalu banyak percobaan password salah. Coba lagi 15 menit lagi.".getBytes("UTF-8"), null);
@@ -249,6 +277,12 @@ public class WebServer {
         if ((m.equals("PUT") || m.equals("POST")) && p.equals("/api/upload")) { upload(r); return; }
         if (m.equals("POST") && p.equals("/api/mkdir")) { mkdir(r); return; }
         if (m.equals("POST") && p.equals("/api/delete")) { delete(r); return; }
+        if (m.equals("GET") && p.equals("/api/https")) { httpsStatus(r); return; }
+        if (m.equals("POST") && p.equals("/api/https/renew")) {
+            RecorderService.requestCertRenew();
+            json(r, 200, "{\"ok\":true}");
+            return;
+        }
         if (m.equals("GET") && p.equals("/api/version")) { version(r); return; }
         if ((m.equals("PUT") || m.equals("POST")) && p.equals("/api/update")) { updateApk(r); return; }
         if (m.equals("GET") && p.equals("/api/backups")) { listBackups(r); return; }
@@ -507,6 +541,17 @@ public class WebServer {
         return f.delete();
     }
 
+    private void httpsStatus(Req r) throws IOException {
+        Config c = new Config(ctx);
+        File cert = new File(new File(ctx.getFilesDir(), "acme"), "cert.pem");
+        Date exp = cert.isFile() ? Acme.certExpiry(cert) : null;
+        json(r, 200, "{\"enabled\":" + c.isHttpsEnabled()
+                + ",\"active\":" + RecorderService.httpsActive
+                + ",\"domain\":" + js(c.getDomain())
+                + ",\"expires\":" + (exp == null ? "null" : String.valueOf(exp.getTime()))
+                + ",\"status\":" + js(RecorderService.httpsStatus) + "}");
+    }
+
     // =====================================================================
     //  Update aplikasi lewat web
     // =====================================================================
@@ -681,6 +726,10 @@ public class WebServer {
             o.put("web", c.isWebEnabled());
             o.put("port", c.getWebPort());
             o.put("pass", c.getWebPassword());
+            o.put("https", c.isHttpsEnabled());
+            o.put("domain", c.getDomain());
+            o.put("email", c.getAcmeEmail());
+            o.put("httpsport", c.getHttpsPort());
             json(r, 200, o.toString());
         } catch (JSONException e) {
             json(r, 500, "{\"error\":\"json\"}");
@@ -706,6 +755,8 @@ public class WebServer {
         c.setEnabled(enabled);
         c.saveWeb(o.optBoolean("web", c.isWebEnabled()), o.optInt("port", c.getWebPort()),
                 o.optString("pass", c.getWebPassword()));
+        c.saveHttps(o.optBoolean("https", c.isHttpsEnabled()), o.optString("domain", c.getDomain()),
+                o.optString("email", c.getAcmeEmail()), o.optInt("httpsport", c.getHttpsPort()));
         json(r, 200, "{\"ok\":true}");
         RecorderService.apply(ctx);    // setelah respons terkirim (web server bisa ikut restart)
     }
@@ -723,12 +774,24 @@ public class WebServer {
     }
 
     private void storages(Req r) throws IOException {
-        StringBuilder sb = new StringBuilder("[");
+        StringBuilder sb = new StringBuilder("{\"ok\":[");
+        boolean first = true;
         for (String s : Storage.recordingCandidates(ctx)) {
-            if (sb.length() > 1) sb.append(',');
-            sb.append("{\"path\":").append(js(s)).append(",\"free\":").append(RecorderService.freeBytes(new File(s))).append('}');
+            if (!first) sb.append(',');
+            first = false;
+            sb.append("{\"path\":").append(js(s)).append(",\"free\":").append(RecorderService.freeBytes(new File(s)))
+              .append(",\"internal\":").append(Storage.isInternal(s)).append('}');
         }
-        json(r, 200, sb.append(']').toString());
+        sb.append("],\"bad\":[");
+        first = true;
+        for (Storage.Mount m : Storage.mounts(ctx)) {
+            if (m.writable != null) continue;
+            if (!first) sb.append(',');
+            first = false;
+            sb.append("{\"path\":").append(js(m.path)).append(",\"fs\":").append(js(m.fs))
+              .append(",\"note\":").append(js(m.note)).append('}');
+        }
+        json(r, 200, sb.append("]}").toString());
     }
 
     private String readBody(Req r) throws IOException {
@@ -1001,6 +1064,7 @@ public class WebServer {
         String status;
         switch (code) {
             case 200: status = "OK"; break;
+            case 301: status = "Moved Permanently"; break;
             case 400: status = "Bad Request"; break;
             case 401: status = "Unauthorized"; break;
             case 403: status = "Forbidden"; break;

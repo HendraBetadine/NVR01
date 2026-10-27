@@ -49,6 +49,22 @@ public class RecorderService extends Service {
 
     public static volatile String webInfo = "";
 
+    // ---- HTTPS ----
+    public static volatile boolean httpsActive = false;
+    public static volatile String httpsDomain = "";
+    public static volatile String httpsStatus = "";
+    private static final Object CERT_LOCK = new Object();
+    private static volatile boolean forceRenew = false;
+    private volatile boolean httpsWanted = false;
+    private Thread certThread;
+    private WebServer webHttps;
+
+    /** Dipanggil dari web: minta / perpanjang sertifikat sekarang. */
+    public static void requestCertRenew() {
+        forceRenew = true;
+        synchronized (CERT_LOCK) { CERT_LOCK.notifyAll(); }
+    }
+
     private static final String ACTION_APPLY = "id.nvr.stb.APPLY";
 
     private final List<Worker> workers = new ArrayList<>();
@@ -115,6 +131,9 @@ public class RecorderService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
+        // TLS modern (1.2/1.3) untuk Android 4.4: dipakai server HTTPS & koneksi ke Let's Encrypt.
+        try { java.security.Security.insertProviderAt(org.conscrypt.Conscrypt.newProvider(), 1); }
+        catch (Throwable t) { Log.w(TAG, "Conscrypt tidak tersedia", t); }
         Notification n = buildNotification("Merekam 24/7");
         if (Build.VERSION.SDK_INT >= 29) {
             startForeground(NOTIF_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);
@@ -162,10 +181,89 @@ public class RecorderService extends Service {
             }
         }
 
+        manageHttps(cfg);
+
         if (!cfg.isEnabled() && !cfg.isWebEnabled()) { stopSelf(); return START_NOT_STICKY; }
         updateNotification((running ? "Merekam" : "Tidak merekam")
                 + (web != null ? " · web :" + cfg.getWebPort() : ""));
         return START_STICKY;   // dihidupkan ulang sistem jika ter-kill
+    }
+
+    // =====================================================================
+    //  HTTPS: sertifikat Let's Encrypt otomatis + server HTTPS
+    // =====================================================================
+    private void manageHttps(Config cfg) {
+        httpsWanted = cfg.isWebEnabled() && cfg.isHttpsEnabled() && !cfg.getDomain().isEmpty();
+        httpsDomain = cfg.getDomain();
+        if (!httpsWanted) {
+            stopHttpsServer();
+            httpsStatus = cfg.isHttpsEnabled() ? "Isi nama domain dulu" : "";
+            synchronized (CERT_LOCK) { CERT_LOCK.notifyAll(); }   // hentikan loop sertifikat
+            return;
+        }
+        // Port / password berubah -> jalankan ulang server HTTPS dengan pengaturan baru.
+        synchronized (this) {
+            if (webHttps != null && (webHttps.getPort() != cfg.getHttpsPort()
+                    || !webHttps.getPassword().equals(cfg.getWebPassword()))) {
+                stopHttpsServer();
+            }
+        }
+        if (certThread == null || !certThread.isAlive()) {
+            certThread = new Thread(this::certLoop, "acme");
+            certThread.start();
+        } else {
+            synchronized (CERT_LOCK) { CERT_LOCK.notifyAll(); }
+        }
+    }
+
+    private Acme acme() throws Exception {
+        String roots = new String(Acme.readAll(getAssets().open("isrg-roots.pem")), "US-ASCII");
+        return new Acme(Acme.LETSENCRYPT, new File(getFilesDir(), "acme"), Acme.clientFactory(roots),
+                msg -> { httpsStatus = msg; Log.i(TAG, "acme: " + msg); });
+    }
+
+    private void certLoop() {
+        while (httpsWanted) {
+            long wait = 12 * 3600_000L;
+            try {
+                Config cfg = new Config(this);
+                String domain = cfg.getDomain();
+                Acme acme = acme();
+                if (acme.certValidFor(domain, 0)) startHttpsServer(acme, cfg);   // pakai sertifikat lama dulu
+                if (forceRenew || !acme.certValidFor(domain, 30)) {
+                    forceRenew = false;
+                    acme.obtain(domain, cfg.getAcmeEmail());
+                    stopHttpsServer();
+                    startHttpsServer(acme, cfg);
+                }
+                java.util.Date exp = Acme.certExpiry(acme.certFile());
+                httpsStatus = "Aktif ✓ · sertifikat berlaku sampai "
+                        + new java.text.SimpleDateFormat("dd MMM yyyy", new java.util.Locale("id", "ID")).format(exp)
+                        + " (diperpanjang otomatis)";
+            } catch (Exception e) {
+                Log.w(TAG, "https", e);
+                httpsStatus = "Gagal: " + e.getMessage() + " (dicoba lagi 1 jam lagi)";
+                wait = 3600_000L;   // batas Let's Encrypt: jangan terlalu sering mencoba
+            }
+            synchronized (CERT_LOCK) {
+                if (!httpsWanted || forceRenew) continue;
+                try { CERT_LOCK.wait(wait); } catch (InterruptedException ie) { return; }
+            }
+        }
+        stopHttpsServer();
+    }
+
+    private synchronized void startHttpsServer(Acme acme, Config cfg) throws Exception {
+        if (webHttps != null) return;
+        WebServer w = new WebServer(this, cfg.getHttpsPort(), cfg.getWebPassword(), acme.serverFactory());
+        w.start();
+        webHttps = w;
+        httpsActive = true;
+    }
+
+    private synchronized void stopHttpsServer() {
+        if (webHttps != null) { webHttps.stop(); webHttps = null; }
+        httpsActive = false;
     }
 
     private void stopRecording() {
@@ -212,6 +310,9 @@ public class RecorderService extends Service {
         retryHandler.removeCallbacks(retryStart);
         stopRecording();
         if (web != null) { web.stop(); web = null; }
+        httpsWanted = false;
+        synchronized (CERT_LOCK) { CERT_LOCK.notifyAll(); }
+        stopHttpsServer();
         webInfo = "";
         if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
         if (wifiLock != null && wifiLock.isHeld()) wifiLock.release();

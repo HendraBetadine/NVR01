@@ -207,6 +207,7 @@
       <h2>Penyimpanan</h2>
       <label class="f"><span>Folder rekaman (pakai HDD/flashdisk USB)</span>
         <select id="cPathSel"></select></label>
+      <div class="mute" id="cPathBad" style="margin:-6px 0 12px"></div>
       <label class="f"><span>…atau ketik path manual</span><input id="cPath"></label>
       <div class="grid3">
         <label class="f"><span>Durasi per file (menit)</span><input id="cSeg" type="number" min="1"></label>
@@ -223,6 +224,19 @@
         <div class="check" style="margin-top:22px"><input type="checkbox" id="cWeb"><label for="cWeb">Web server aktif</label></div>
       </div>
       <div class="mute">Mengubah port/password akan memutus halaman ini — buka lagi dengan port/password baru.</div>
+    </div>
+
+    <div class="card">
+      <h2>HTTPS (Let's Encrypt, otomatis)</h2>
+      <div class="check"><input type="checkbox" id="cHttps"><label for="cHttps">Aktifkan HTTPS untuk akses dari internet</label></div>
+      <div class="grid3">
+        <label class="f"><span>Domain</span><input id="cDomain" placeholder="home.58s.my.id"></label>
+        <label class="f"><span>Email (opsional, untuk peringatan dari Let's Encrypt)</span><input id="cEmail" type="email"></label>
+        <label class="f"><span>Port HTTPS di STB</span><input id="cHttpsPort" type="number" min="1024" max="65535"></label>
+      </div>
+      <div style="margin-bottom:10px">Status: <b id="httpsState">—</b></div>
+      <div class="bar"><button id="httpsRenew">🔒 Minta / perpanjang sertifikat sekarang</button></div>
+      <div class="mute" id="httpsHelp"></div>
     </div>
 
     <div class="bar">
@@ -586,15 +600,42 @@ async function loadCfg() {
   $('#cCams').value = cfg.cams; $('#cAudio').checked = cfg.audio;
   $('#cPath').value = cfg.path; $('#cSeg').value = cfg.seg; $('#cMinFree').value = cfg.minfree; $('#cDays').value = cfg.days;
   $('#cPort').value = cfg.port; $('#cPass').value = cfg.pass; $('#cWeb').checked = cfg.web;
-  const st = await api('/api/storages').catch(() => []);
-  const opts = st.map(s => `<option value="${esc(s.path)}">${esc(s.path)} — ${fmtSize(s.free)} kosong</option>`);
-  if (cfg.path && !st.some(s => s.path === cfg.path)) opts.unshift(`<option value="${esc(cfg.path)}">${esc(cfg.path)}</option>`);
+  $('#cHttps').checked = cfg.https; $('#cDomain').value = cfg.domain; $('#cEmail').value = cfg.email; $('#cHttpsPort').value = cfg.httpsport;
+  httpsHelp(); loadHttps();
+  const st = await api('/api/storages').catch(() => ({ok: [], bad: []}));
+  const opts = st.ok.map(s => `<option value="${esc(s.path)}">${s.internal ? '[INTERNAL] ' : '[USB] '}${esc(s.path)} — ${fmtSize(s.free)} kosong</option>`);
+  if (cfg.path && !st.ok.some(s => s.path === cfg.path)) opts.unshift(`<option value="${esc(cfg.path)}">${esc(cfg.path)}</option>`);
   opts.unshift('<option value="">— pilih storage —</option>');
   $('#cPathSel').innerHTML = opts.join(''); $('#cPathSel').value = cfg.path;
+  $('#cPathBad').innerHTML = st.bad.length ? '⚠ Terdeteksi tapi tidak bisa ditulis: ' +
+    st.bad.map(b => `<b>${esc(b.path)}</b> (${esc(b.fs)}) — ${esc(b.note)}`).join('; ') : '';
   showRecState();
   loadBackups(); fillLogCams();
   api('/api/version').then(v => $('#appVer').textContent = v.name + ' (build ' + v.code + ')').catch(() => {});
 }
+
+// ---- HTTPS ----
+function httpsHelp() {
+  const http = +$('#cPort').value || 8080, https = +$('#cHttpsPort').value || 8443;
+  const ip = location.hostname;
+  $('#httpsHelp').innerHTML = `Di router (DNAT): port publik <b>80 → ${esc(ip)}:${http}</b> (untuk validasi & perpanjangan sertifikat) dan
+    <b>443 → ${esc(ip)}:${https}</b>. Domain harus mengarah ke IP publik Anda. Akses dari LAN tetap lewat http://${esc(ip)}:${http}.`;
+}
+['#cPort', '#cHttpsPort'].forEach(s => $(s).addEventListener('input', httpsHelp));
+async function loadHttps() {
+  const h = await api('/api/https').catch(() => null);
+  if (!h) return;
+  const el = $('#httpsState');
+  el.textContent = !h.enabled ? 'Mati' : (h.status || (h.active ? 'Aktif' : 'Menyiapkan…'));
+  el.style.color = h.active ? 'var(--ok)' : (/Gagal/.test(h.status) ? 'var(--bad)' : 'var(--mute)');
+  if ($('#cfg').classList.contains('on') && h.enabled && !h.active) setTimeout(loadHttps, 4000);
+}
+$('#httpsRenew').onclick = async () => {
+  if (!cfg.https) { toast('Aktifkan HTTPS lalu klik "Simpan & terapkan" dulu'); return; }
+  await api('/api/https/renew', {method:'POST'}).catch(e => toast(e.message));
+  toast('Meminta sertifikat… (± 30 detik)', 5000);
+  setTimeout(loadHttps, 3000);
+};
 
 // ---- Backup & restore daftar kamera ----
 async function loadBackups() {
@@ -681,8 +722,14 @@ $('#cSave').onclick = async () => {
   const body = {
     cams: $('#cCams').value, audio: $('#cAudio').checked, path: $('#cPath').value.trim(),
     seg: +$('#cSeg').value || 10, minfree: +$('#cMinFree').value || 5, days: +$('#cDays').value || 0,
-    port: +$('#cPort').value || 8080, pass: $('#cPass').value, web: $('#cWeb').checked, enabled: cfg.enabled
+    port: +$('#cPort').value || 8080, pass: $('#cPass').value, web: $('#cWeb').checked, enabled: cfg.enabled,
+    https: $('#cHttps').checked, domain: $('#cDomain').value.trim(), email: $('#cEmail').value.trim(),
+    httpsport: +$('#cHttpsPort').value || 8443
   };
+  if (body.https && !body.domain) { toast('Isi domain untuk HTTPS'); return; }
+  if (body.https && (body.pass.length < 8 || /^(admin|password|12345678)$/i.test(body.pass))) {
+    toast('Untuk akses internet, password web minimal 8 karakter & bukan password default', 6000); return;
+  }
   if (!body.web && !confirm('Web server akan dimatikan dan halaman ini tidak bisa dibuka lagi sampai diaktifkan dari STB. Lanjut?')) return;
   const moved = body.port !== cfg.port || body.pass !== cfg.pass;
   $('#cSave').disabled = true;
@@ -694,6 +741,7 @@ $('#cSave').onclick = async () => {
       return;
     }
     toast('Tersimpan & diterapkan ✓'); cfg = Object.assign(cfg, body);
+    setTimeout(loadHttps, 1500);
     loaded.play = false;
   } catch (e) { toast('Gagal: ' + e.message, 6000); }
   finally { $('#cSave').disabled = false; }

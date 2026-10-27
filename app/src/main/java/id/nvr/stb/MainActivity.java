@@ -238,19 +238,32 @@ public class MainActivity extends Activity {
 
     private void pickStorage() {
         final List<String> list = Storage.recordingCandidates(this);
+        // Disk yang terdeteksi tapi tidak bisa ditulis -> tampilkan alasannya
+        StringBuilder bad = new StringBuilder();
+        for (Storage.Mount m : Storage.mounts(this)) {
+            if (m.writable == null) bad.append("• ").append(m.path).append(" (").append(m.fs).append("): ").append(m.note).append('\n');
+        }
         if (list.isEmpty()) {
-            Toast.makeText(this, "Tidak ada storage yang bisa ditulis. Cek HDD/flashdisk.", Toast.LENGTH_LONG).show();
+            new AlertDialog.Builder(this)
+                    .setTitle("Tidak ada storage yang bisa ditulis")
+                    .setMessage(bad.length() > 0 ? "Terdeteksi tapi tidak bisa ditulis:\n" + bad
+                            : "Tidak ada flashdisk/HDD terdeteksi. Cabut-colok lalu coba lagi.")
+                    .setPositiveButton("OK", null).show();
             return;
         }
         String[] items = new String[list.size()];
         for (int i = 0; i < list.size(); i++) {
             long free = RecorderService.freeBytes(new File(list.get(i)));
-            items[i] = String.format("%s   (%.1f GB kosong)", list.get(i), free / 1073741824.0);
+            items[i] = String.format("%s%s   (%.1f GB kosong)", Storage.isInternal(list.get(i)) ? "[INTERNAL] " : "[USB] ",
+                    list.get(i), free / 1073741824.0);
         }
-        new AlertDialog.Builder(this)
+        AlertDialog.Builder dlg = new AlertDialog.Builder(this)
                 .setTitle("Pilih folder rekaman")
-                .setItems(items, (d, w) -> etPath.setText(list.get(w)))
-                .show();
+                .setItems(items, (d, w) -> etPath.setText(list.get(w)));
+        if (bad.length() > 0) dlg.setNegativeButton("Disk lain tidak muncul?", (d, w) ->
+                new AlertDialog.Builder(this).setTitle("Disk yang tidak bisa ditulis").setMessage(bad.toString())
+                        .setPositiveButton("OK", null).show());
+        dlg.show();
     }
 
     // ---- helper UI ----

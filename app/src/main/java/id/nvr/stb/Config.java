@@ -48,6 +48,18 @@ public class Config {
     public boolean isLiveOnBoot() { return sp.getBoolean("liveboot", false); }
     public void setLiveOnBoot(boolean on) { sp.edit().putBoolean("liveboot", on).apply(); }
 
+    // ---- HTTPS (Let's Encrypt) ----
+    public boolean isHttpsEnabled() { return sp.getBoolean("https", false); }
+    public String getDomain() { return sp.getString("domain", "").trim().toLowerCase(); }
+    public String getAcmeEmail() { return sp.getString("acmemail", "").trim(); }
+    public int getHttpsPort() { return sp.getInt("httpsport", 8443); }
+
+    public void saveHttps(boolean on, String domain, String email, int port) {
+        if (port < 1024 || port > 65535) port = 8443;
+        sp.edit().putBoolean("https", on).putString("domain", domain == null ? "" : domain.trim().toLowerCase())
+                .putString("acmemail", email == null ? "" : email.trim()).putInt("httpsport", port).apply();
+    }
+
     // ---- Web server ----
     public boolean isWebEnabled() { return sp.getBoolean("web", true); }
     public int getWebPort() { return sp.getInt("webport", 8080); }

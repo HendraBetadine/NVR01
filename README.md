@@ -68,6 +68,16 @@ Aktif otomatis. Alamatnya tampil di bagian atas layar aplikasi, misalnya `http:/
 - Hanya untuk jaringan lokal. **Jangan** di-port-forward ke internet tanpa VPN.
 - Jangan simpan file `.mkv` pribadi di dalam folder kamera — folder itu ikut dibersihkan otomatis.
 
+## E. HTTPS langsung di STB (tanpa proxy)
+
+1. Ganti password web (minimal 8 karakter, bukan `admin`).
+2. Pengaturan → **HTTPS**: centang aktif, isi domain (mis. `home.58s.my.id`), Simpan & terapkan.
+3. Di router, DNAT IP publik:
+   - port **80 → IP-STB:8080** (validasi & perpanjangan sertifikat Let's Encrypt)
+   - port **443 → IP-STB:8443** (HTTPS)
+4. Sertifikat diminta otomatis (±30 detik) dan diperpanjang sendiri 30 hari sebelum habis.
+   Akses `http://` dari internet otomatis dialihkan ke `https://`. Akses LAN tetap `http://IP-STB:8080`.
+
 ### URL RTSP umum (pakai substream supaya ringan)
 | Merek | Substream |
 |---|---|
