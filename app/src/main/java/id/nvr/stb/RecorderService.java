@@ -53,6 +53,15 @@ public class RecorderService extends Service {
 
     private final List<Worker> workers = new ArrayList<>();
     private Thread cleaner;
+    private final android.os.Handler retryHandler = new android.os.Handler();
+    private final Runnable retryStart = new Runnable() {
+        @Override public void run() {
+            Config cfg = new Config(RecorderService.this);
+            if (!cfg.isEnabled() || running) return;
+            startRecording(cfg);
+            if (!running) retryHandler.postDelayed(this, 20_000);
+        }
+    };
     private WebServer web;
     private PowerManager.WakeLock wakeLock;
     private WifiManager.WifiLock wifiLock;
@@ -133,6 +142,9 @@ public class RecorderService extends Service {
         // --- Rekaman ---
         if (applyNow) stopRecording();
         if (cfg.isEnabled() && !running) startRecording(cfg);
+        // Setelah boot, HDD USB sering baru ter-mount beberapa detik kemudian -> coba lagi tiap 20 dtk.
+        retryHandler.removeCallbacks(retryStart);
+        if (cfg.isEnabled() && !running) retryHandler.postDelayed(retryStart, 20_000);
         if (!cfg.isEnabled() && running) stopRecording();
 
         // --- Web server ---
@@ -175,7 +187,7 @@ public class RecorderService extends Service {
         String root = cfg.getStoragePath();
         File rootDir = new File(root);
         if (root.isEmpty() || !(rootDir.isDirectory() || rootDir.mkdirs()) || !rootDir.canWrite()) {
-            STATUS.put("ERROR", "Folder rekaman tidak bisa ditulis: " + root);
+            STATUS.put("ERROR", "Menunggu HDD / folder rekaman bisa ditulis: " + root + " (dicoba tiap 20 dtk)");
             return;
         }
         List<Config.Camera> cams = cfg.getCameras();
@@ -197,6 +209,7 @@ public class RecorderService extends Service {
 
     @Override
     public void onDestroy() {
+        retryHandler.removeCallbacks(retryStart);
         stopRecording();
         if (web != null) { web.stop(); web = null; }
         webInfo = "";
