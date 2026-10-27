@@ -17,6 +17,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.RandomAccessFile;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
@@ -135,11 +136,29 @@ public class WebServer {
             }
 
             // Live view di layar TV STB mengakses lewat 127.0.0.1 -> tidak perlu password.
-            boolean local = sock.getInetAddress() != null && sock.getInetAddress().isLoopbackAddress();
-            if (!local && !authorized(r)) {
-                send(r, 401, "text/plain; charset=utf-8", "Butuh password".getBytes("UTF-8"),
-                        "WWW-Authenticate: Basic realm=\"STB NVR\"\r\n");
-                return;
+            InetAddress peer = sock.getInetAddress();
+            boolean local = peer != null && peer.isLoopbackAddress() && r.headers.get("x-forwarded-for") == null;
+            if (!local) {
+                String client = clientIp(peer, r);
+                if (isBlocked(client)) {
+                    send(r, 429, "text/plain; charset=utf-8",
+                            "Terlalu banyak percobaan password salah. Coba lagi 15 menit lagi.".getBytes("UTF-8"), null);
+                    return;
+                }
+                // Akses dari internet (lewat reverse proxy / IP publik) ditolak selama password masih lemah.
+                if (!isLan(client) && weakPassword()) {
+                    send(r, 403, "text/plain; charset=utf-8",
+                            ("Akses dari internet ditolak: password web masih lemah (default/kosong/kurang dari 8 karakter).\n"
+                            + "Ganti password di Pengaturan (dari jaringan lokal) dulu.").getBytes("UTF-8"), null);
+                    return;
+                }
+                if (!authorized(r)) {
+                    if (r.headers.containsKey("authorization")) recordFail(client);
+                    send(r, 401, "text/plain; charset=utf-8", "Butuh password".getBytes("UTF-8"),
+                            "WWW-Authenticate: Basic realm=\"STB NVR\"\r\n");
+                    return;
+                }
+                clearFails(client);
             }
             route(r);
             r.out.flush();
@@ -149,6 +168,58 @@ public class WebServer {
             try { sock.close(); } catch (IOException ignored) { }
         }
     }
+
+    // ---- Pengaman akses dari internet ----
+    private static final int MAX_FAILS = 8;
+    private static final long FAIL_WINDOW = 10 * 60_000L, BLOCK_FOR = 15 * 60_000L;
+    private final Map<String, long[]> fails = new HashMap<>();   // ip -> {jumlah, waktu pertama, blokir sampai}
+
+    /** IP klien asli. Jika datang dari reverse proxy di LAN (mis. Caddy), pakai X-Forwarded-For. */
+    private static String clientIp(InetAddress peer, Req r) {
+        String ip = peer == null ? "?" : peer.getHostAddress();
+        String xff = r.headers.get("x-forwarded-for");
+        if (xff != null && peer != null && (peer.isSiteLocalAddress() || peer.isLoopbackAddress())) {
+            String first = xff.split(",")[0].trim();
+            if (!first.isEmpty()) ip = first;
+        }
+        return ip;
+    }
+
+    private static boolean isLan(String ip) {
+        if (ip.startsWith("10.") || ip.startsWith("192.168.") || ip.startsWith("127.") || ip.startsWith("169.254.")) return true;
+        if (ip.startsWith("172.")) {
+            try {
+                int b = Integer.parseInt(ip.split("\\.")[1]);
+                return b >= 16 && b <= 31;
+            } catch (Exception e) { return false; }
+        }
+        return false;
+    }
+
+    private boolean weakPassword() {
+        return password.length() < 8 || password.equalsIgnoreCase("admin") || password.equals("12345678")
+                || password.equalsIgnoreCase("password");
+    }
+
+    private synchronized boolean isBlocked(String ip) {
+        long[] f = fails.get(ip);
+        return f != null && System.currentTimeMillis() < f[2];
+    }
+
+    private synchronized void recordFail(String ip) {
+        long now = System.currentTimeMillis();
+        long[] f = fails.get(ip);
+        if (f == null || now - f[1] > FAIL_WINDOW) { f = new long[]{0, now, 0}; fails.put(ip, f); }
+        if (++f[0] >= MAX_FAILS) {
+            f[2] = now + BLOCK_FOR;
+            f[0] = 0;
+            f[1] = now;
+            Log.w(TAG, "blokir " + ip + " (password salah berulang)");
+        }
+        if (fails.size() > 1000) fails.clear();
+    }
+
+    private synchronized void clearFails(String ip) { fails.remove(ip); }
 
     private boolean authorized(Req r) {
         if (password.isEmpty()) return true;
@@ -936,6 +1007,7 @@ public class WebServer {
             case 404: status = "Not Found"; break;
             case 411: status = "Length Required"; break;
             case 416: status = "Range Not Satisfiable"; break;
+            case 429: status = "Too Many Requests"; break;
             case 507: status = "Insufficient Storage"; break;
             default: status = "Error";
         }
