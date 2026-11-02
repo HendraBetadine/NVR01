@@ -248,7 +248,7 @@
       <h2>Log kamera</h2>
       <div class="bar">
         <select id="logCam"></select>
-        <select id="logType"><option value="rec">Log rekaman</option><option value="live">Log live view</option></select>
+        <select id="logType"><option value="rec">Log rekaman</option><option value="live">Log live view</option><option value="anr">Aplikasi macet (not responding)</option><option value="crash">Aplikasi crash</option></select>
         <button id="logRef">⟳ Muat log</button>
       </div>
       <pre id="logText" class="log">Pilih kamera lalu klik "Muat log".</pre>
@@ -696,7 +696,7 @@ function fillLogCams() {
   $('#logCam').innerHTML = names.map(n => `<option>${esc(n)}</option>`).join('');
 }
 $('#logRef').onclick = async () => {
-  const cam = $('#logCam').value; if (!cam) return;
+  const cam = $('#logCam').value; if (!cam && !/anr|crash/.test($('#logType').value)) return;
   $('#logText').textContent = 'memuat…';
   const r = await fetch('/api/log?' + q({cam, type: $('#logType').value}));
   $('#logText').textContent = (await r.text()) || '(log kosong)';

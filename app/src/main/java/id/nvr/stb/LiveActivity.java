@@ -17,8 +17,9 @@ import android.view.WindowManager;
 import android.widget.Button;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
+import android.view.SurfaceHolder;
+import android.view.SurfaceView;
 import android.widget.TextView;
-import android.widget.VideoView;
 
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
@@ -45,13 +46,23 @@ public class LiveActivity extends Activity {
     private int layout = 4, page = 0;
     private String solo = null;
 
+    /**
+     * Thread latar untuk operasi pemutar yang bisa lama (buka stream, release).
+     * Di Android 4.4, MediaPlayer.release() bisa tertahan beberapa detik saat stream sedang
+     * menyambung -> kalau di thread utama, aplikasi "Not responding".
+     */
+    private final java.util.concurrent.ExecutorService io = java.util.concurrent.Executors.newCachedThreadPool();
+
     private class Tile {
         FrameLayout frame;
-        VideoView video;
+        SurfaceView surface;
         TextView msg;
         String cam;
+        volatile MediaPlayer mp;
+        volatile int gen;               // naik tiap start/stop; callback lama diabaikan
+        volatile boolean surfaceReady;
+        volatile int lastPos = -1;
         long lastStart, lastMove;
-        int lastPos = -1;
         boolean playing;
         final Runnable retry = new Runnable() { @Override public void run() { start(); } };
 
@@ -64,33 +75,70 @@ public class LiveActivity extends Activity {
             lastPos = -1;
             msg.setText("Menyambung…");
             msg.setVisibility(View.VISIBLE);
-            try {
-                video.stopPlayback();
-                video.setVideoURI(Uri.parse("http://127.0.0.1:" + cfg.getWebPort() + "/live/"
-                        + Uri.encode(cam) + "/index.m3u8"));
-                video.start();
-            } catch (Exception e) {
-                fail();
-            }
+            final int g = ++gen;
+            final MediaPlayer old = mp;
+            mp = null;
+            if (!surfaceReady) { releaseLater(old); return; }   // surfaceCreated akan memanggil start()
+            final SurfaceHolder holder = surface.getHolder();
+            final String url = "http://127.0.0.1:" + cfg.getWebPort() + "/live/" + Uri.encode(cam) + "/index.m3u8";
+            io.execute(() -> {
+                if (old != null) try { old.release(); } catch (Exception ignored) { }
+                if (g != gen || isFinishing()) return;
+                // Dibuat di thread tanpa Looper -> callback dikirim ke thread utama (ringan).
+                MediaPlayer m = new MediaPlayer();
+                try {
+                    m.setOnPreparedListener(p -> {
+                        if (g != gen) return;
+                        try { p.setVolume(0f, 0f); p.start(); } catch (Exception ignored) { }
+                    });
+                    m.setOnInfoListener((p, what, extra) -> {
+                        if (g == gen && what == MediaPlayer.MEDIA_INFO_VIDEO_RENDERING_START) {
+                            playing = true;
+                            msg.setVisibility(View.GONE);
+                        }
+                        return false;
+                    });
+                    m.setOnErrorListener((p, what, extra) -> { if (g == gen) fail(); return true; });
+                    m.setOnCompletionListener(p -> { if (g == gen) fail(); });   // stream berhenti -> sambung ulang
+                    m.setDataSource(url);
+                    m.setDisplay(holder);
+                    m.setScreenOnWhilePlaying(true);
+                    if (g != gen) { m.release(); return; }
+                    mp = m;
+                    m.prepareAsync();
+                } catch (Exception e) {
+                    try { m.release(); } catch (Exception ignored) { }
+                    runOnUiThread(() -> { if (g == gen) fail(); });
+                }
+            });
         }
 
         void fail() {
             playing = false;
-            msg.setText("Tidak ada sinyal");
+            msg.setText("Tidak ada sinyal — menyambung ulang…");
             msg.setVisibility(View.VISIBLE);
             handler.removeCallbacks(retry);
-            handler.postDelayed(retry, 5000);
+            handler.postDelayed(retry, 4000);
         }
 
         void stop() {
             handler.removeCallbacks(retry);
-            try { video.stopPlayback(); } catch (Exception ignored) { }
+            gen++;
+            MediaPlayer old = mp;
+            mp = null;
+            releaseLater(old);
         }
+    }
+
+    private void releaseLater(final MediaPlayer m) {
+        if (m == null) return;
+        io.execute(() -> { try { m.release(); } catch (Exception ignored) { } });
     }
 
     @Override
     protected void onCreate(Bundle b) {
         super.onCreate(b);
+        Diag.install(this);
         requestWindowFeature(Window.FEATURE_NO_TITLE);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN
                 | WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
@@ -170,25 +218,42 @@ public class LiveActivity extends Activity {
     /** Tile yang tidak mulai main, atau gambarnya berhenti bergerak -> sambung ulang. */
     private final Runnable watchdog = new Runnable() {
         @Override public void run() {
-            long now = System.currentTimeMillis();
-            for (Tile t : tiles) {
-                if (t.cam == null) continue;
-                if (!t.playing) {
-                    if (now - t.lastStart > 20_000) t.start();
-                    continue;
+            final List<Tile> snap = new ArrayList<>(tiles);
+            // Posisi video dibaca di latar (panggilan ke mediaserver bisa lambat), lalu diputuskan di thread utama.
+            io.execute(() -> {
+                final int[] pos = new int[snap.size()];
+                for (int i = 0; i < snap.size(); i++) {
+                    MediaPlayer m = snap.get(i).mp;
+                    pos[i] = -1;
+                    if (m != null) try { pos[i] = m.getCurrentPosition(); } catch (Exception ignored) { }
                 }
-                int pos = -1;
-                try { pos = t.video.getCurrentPosition(); } catch (Exception ignored) { }
-                if (pos != t.lastPos) { t.lastPos = pos; t.lastMove = now; }
-                else if (now - t.lastMove > 12_000) {
-                    t.msg.setText("Gambar macet — menyambung ulang…");
-                    t.msg.setVisibility(View.VISIBLE);
-                    t.start();
-                }
-            }
+                runOnUiThread(() -> {
+                    long now = System.currentTimeMillis();
+                    for (int i = 0; i < snap.size(); i++) {
+                        Tile t = snap.get(i);
+                        if (t.cam == null || !tiles.contains(t)) continue;
+                        if (!t.playing) {
+                            if (now - t.lastStart > 20_000) t.start();
+                            continue;
+                        }
+                        if (pos[i] != t.lastPos) { t.lastPos = pos[i]; t.lastMove = now; }
+                        else if (now - t.lastMove > 12_000) {
+                            t.start();
+                            t.msg.setText("Gambar macet — menyambung ulang…");
+                        }
+                    }
+                });
+            });
             handler.postDelayed(this, 3_000);
         }
     };
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        for (Tile t : tiles) t.stop();
+        io.shutdown();   // release yang sudah antre tetap dijalankan
+    }
 
     // ---- Susun grid ----
     private void build() {
@@ -229,7 +294,7 @@ public class LiveActivity extends Activity {
                 tiles.add(t);
             }
         }
-        for (Tile t : tiles) t.start();
+        // Pemutar dimulai otomatis begitu permukaan video siap (surfaceCreated).
         if (!tiles.isEmpty()) tiles.get(0).frame.requestFocus();
     }
 
@@ -241,24 +306,21 @@ public class LiveActivity extends Activity {
         t.frame.setFocusable(true);
 
         if (cam != null) {
-            t.video = new VideoView(this);
-            t.video.setFocusable(false);
+            t.surface = new SurfaceView(this);
+            t.surface.setFocusable(false);
             FrameLayout.LayoutParams vlp = new FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT, Gravity.CENTER);
-            t.frame.addView(t.video, vlp);
-            t.video.setOnPreparedListener(mp -> {
-                mp.setVolume(0f, 0f);
-                t.playing = true;
-                t.msg.setVisibility(View.GONE);
-            });
-            t.video.setOnErrorListener((mp, what, extra) -> { t.fail(); return true; });
-            t.video.setOnCompletionListener(mp -> t.fail());   // stream live berhenti -> sambung ulang
-            t.video.setOnInfoListener((mp, what, extra) -> {
-                if (what == MediaPlayer.MEDIA_INFO_VIDEO_RENDERING_START) {
-                    t.playing = true;
-                    t.msg.setVisibility(View.GONE);
+            t.frame.addView(t.surface, vlp);
+            t.surface.getHolder().addCallback(new SurfaceHolder.Callback() {
+                @Override public void surfaceCreated(SurfaceHolder h) {
+                    t.surfaceReady = true;
+                    if (tiles.contains(t)) t.start();
                 }
-                return false;
+                @Override public void surfaceChanged(SurfaceHolder h, int f, int w, int hh) { }
+                @Override public void surfaceDestroyed(SurfaceHolder h) {
+                    t.surfaceReady = false;
+                    t.stop();
+                }
             });
 
             TextView lbl = new TextView(this);

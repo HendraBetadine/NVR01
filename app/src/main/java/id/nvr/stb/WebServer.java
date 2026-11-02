@@ -321,9 +321,9 @@ public class WebServer {
         }
         if (!LiveManager.touch(ctx, cam)) { json(r, 404, "{\"error\":\"kamera tidak ada\"}"); return; }
         File f = new File(LiveManager.camDir(ctx, cam), file);
-        // Saat baru menyala, tunggu playlist pertama (maks 12 dtk) supaya player tidak langsung error.
+        // Saat baru menyala, tunggu playlist pertama sebentar (maks 4 dtk); player akan mencoba lagi sendiri.
         if (file.endsWith(".m3u8")) {
-            for (int i = 0; i < 24 && !f.isFile(); i++) {
+            for (int i = 0; i < 8 && !f.isFile(); i++) {
                 try { Thread.sleep(500); } catch (InterruptedException e) { break; }
                 LiveManager.touch(ctx, cam);
             }
@@ -700,7 +700,9 @@ public class WebServer {
     /** 64 KB terakhir dari ffmpeg.log kamera (untuk diagnosa). */
     private void camLog(Req r) throws IOException {
         File f;
-        if ("live".equals(r.q("type"))) {
+        if ("anr".equals(r.q("type"))) f = Diag.anrFile(ctx);
+        else if ("crash".equals(r.q("type"))) f = Diag.crashFile(ctx);
+        else if ("live".equals(r.q("type"))) {
             String cam = new File(r.q("cam")).getName();
             f = cam.isEmpty() || cam.startsWith(".") ? null : new File(LiveManager.root(ctx), cam + ".log");
         } else {
@@ -708,7 +710,7 @@ public class WebServer {
             f = dir == null ? null : new File(dir, "ffmpeg.log");
         }
         if (f == null || !f.isFile()) {
-            send(r, 200, "text/plain; charset=utf-8", "(belum ada log untuk kamera ini)".getBytes("UTF-8"), null);
+            send(r, 200, "text/plain; charset=utf-8", "(belum ada log — bagus, berarti belum ada kejadian)".getBytes("UTF-8"), null);
             return;
         }
         RandomAccessFile raf = new RandomAccessFile(f, "r");

@@ -34,6 +34,8 @@ public class MainActivity extends Activity {
     private CheckBox cbAudio, cbWeb;
     private TextView tvStatus, tvWeb;
     private Button btLiveRef;
+    /** Thread latar untuk akses disk/jaringan (jangan pernah di thread utama). */
+    private final java.util.concurrent.ExecutorService io = java.util.concurrent.Executors.newCachedThreadPool();
     private final Handler handler = new Handler();
 
     private final Runnable refresher = new Runnable() {
@@ -46,6 +48,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle b) {
         super.onCreate(b);
+        Diag.install(this);
         cfg = new Config(this);
 
         LinearLayout root = new LinearLayout(this);
@@ -151,8 +154,10 @@ public class MainActivity extends Activity {
         setContentView(sv);
 
         if (cfg.getStoragePath().isEmpty()) {
-            List<String> c = Storage.recordingCandidates(this);
-            if (!c.isEmpty()) etPath.setText(c.get(c.size() - 1));
+            io.execute(() -> {          // pindai storage di latar (flashdisk bisa lambat)
+                final List<String> c = Storage.recordingCandidates(this);
+                runOnUiThread(() -> { if (!c.isEmpty() && etPath.getText().length() == 0) etPath.setText(c.get(0)); });
+            });
         }
         RecorderService.start(this);   // nyalakan web server (dan rekaman jika aktif)
         (cfg.isEnabled() ? btLiveRef : btStart).requestFocus();
@@ -172,11 +177,18 @@ public class MainActivity extends Activity {
     }
 
     private void startRec() {
-        String path = etPath.getText().toString().trim();
-        if (!Storage.testWrite(path)) {
-            Toast.makeText(this, "Folder tidak bisa ditulis. Pilih lewat \"Cari storage\".", Toast.LENGTH_LONG).show();
-            return;
-        }
+        final String path = etPath.getText().toString().trim();
+        Toast.makeText(this, "Memeriksa folder rekaman…", Toast.LENGTH_SHORT).show();
+        io.execute(() -> {
+            final boolean ok = Storage.testWrite(path);
+            runOnUiThread(() -> {
+                if (!ok) Toast.makeText(this, "Folder tidak bisa ditulis. Pilih lewat \"Cari storage\".", Toast.LENGTH_LONG).show();
+                else startRecChecked(path);
+            });
+        });
+    }
+
+    private void startRecChecked(String path) {
         cfg.save(etCams.getText().toString(), path,
                 parse(etSeg, 10), parse(etMinFree, 5), parse(etDays, 0), cbAudio.isChecked());
         if (cfg.getCameras().isEmpty()) {
@@ -195,12 +207,30 @@ public class MainActivity extends Activity {
         Toast.makeText(this, "Perekaman dihentikan.", Toast.LENGTH_SHORT).show();
     }
 
+    // Data yang butuh akses disk/jaringan dihitung di latar; layar hanya menampilkan hasil terakhir.
+    private volatile List<String> ipsCache = new ArrayList<>();
+    private volatile long freeCache = -1;
+    private final java.util.concurrent.atomic.AtomicBoolean probing = new java.util.concurrent.atomic.AtomicBoolean();
+
+    private void probeInBackground(final String path) {
+        if (!probing.compareAndSet(false, true)) return;
+        io.execute(() -> {
+            try {
+                ipsCache = localIps();
+                freeCache = path.isEmpty() ? -1 : RecorderService.freeBytes(new File(path));
+            } finally {
+                probing.set(false);
+            }
+        });
+    }
+
     private void refreshStatus() {
+        probeInBackground(etPath.getText().toString().trim());
         // Alamat web
         if (cfg.isWebEnabled()) {
             String info = RecorderService.webInfo;
             StringBuilder w = new StringBuilder();
-            for (String ip : localIps()) w.append("http://").append(ip).append(':').append(cfg.getWebPort()).append("   ");
+            for (String ip : ipsCache) w.append("http://").append(ip).append(':').append(cfg.getWebPort()).append("   ");
             tvWeb.setText(info.startsWith("Web server gagal") ? info
                     : "Buka di browser:  " + (w.length() > 0 ? w.toString().trim() : "(belum ada jaringan)")
                       + "\nUser: admin   Password: " + (cfg.getWebPassword().isEmpty() ? "(tanpa password)" : cfg.getWebPassword()));
@@ -215,11 +245,7 @@ public class MainActivity extends Activity {
                 sb.append("  ").append(e.getKey()).append(": ").append(e.getValue()).append('\n');
             }
         }
-        String path = etPath.getText().toString().trim();
-        if (!path.isEmpty()) {
-            long free = RecorderService.freeBytes(new File(path));
-            sb.append(String.format("\nSisa ruang: %.1f GB", free / 1073741824.0));
-        }
+        if (freeCache >= 0) sb.append(String.format("\nSisa ruang: %.1f GB", freeCache / 1073741824.0));
         tvStatus.setText(sb.toString());
     }
 
@@ -237,12 +263,21 @@ public class MainActivity extends Activity {
     }
 
     private void pickStorage() {
-        final List<String> list = Storage.recordingCandidates(this);
-        // Disk yang terdeteksi tapi tidak bisa ditulis -> tampilkan alasannya
-        StringBuilder bad = new StringBuilder();
-        for (Storage.Mount m : Storage.mounts(this)) {
-            if (m.writable == null) bad.append("• ").append(m.path).append(" (").append(m.fs).append("): ").append(m.note).append('\n');
-        }
+        Toast.makeText(this, "Mencari storage…", Toast.LENGTH_SHORT).show();
+        io.execute(() -> {
+            final List<String> list = Storage.recordingCandidates(this);
+            // Disk yang terdeteksi tapi tidak bisa ditulis -> tampilkan alasannya
+            final StringBuilder bad = new StringBuilder();
+            for (Storage.Mount m : Storage.mounts(this)) {
+                if (m.writable == null) bad.append("• ").append(m.path).append(" (").append(m.fs).append("): ").append(m.note).append('\n');
+            }
+            final long[] free = new long[list.size()];
+            for (int i = 0; i < list.size(); i++) free[i] = RecorderService.freeBytes(new File(list.get(i)));
+            runOnUiThread(() -> { if (!isFinishing()) showStoragePicker(list, bad, free); });
+        });
+    }
+
+    private void showStoragePicker(final List<String> list, StringBuilder bad, long[] free) {
         if (list.isEmpty()) {
             new AlertDialog.Builder(this)
                     .setTitle("Tidak ada storage yang bisa ditulis")
@@ -253,9 +288,8 @@ public class MainActivity extends Activity {
         }
         String[] items = new String[list.size()];
         for (int i = 0; i < list.size(); i++) {
-            long free = RecorderService.freeBytes(new File(list.get(i)));
             items[i] = String.format("%s%s   (%.1f GB kosong)", Storage.isInternal(list.get(i)) ? "[INTERNAL] " : "[USB] ",
-                    list.get(i), free / 1073741824.0);
+                    list.get(i), free[i] / 1073741824.0);
         }
         AlertDialog.Builder dlg = new AlertDialog.Builder(this)
                 .setTitle("Pilih folder rekaman")

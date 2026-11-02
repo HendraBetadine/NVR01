@@ -54,6 +54,7 @@ public class RecorderService extends Service {
     public static volatile String httpsDomain = "";
     public static volatile String httpsStatus = "";
     private static final Object CERT_LOCK = new Object();
+    private static final java.util.concurrent.CountDownLatch TLS_READY = new java.util.concurrent.CountDownLatch(1);
     private static volatile boolean forceRenew = false;
     private volatile boolean httpsWanted = false;
     private Thread certThread;
@@ -69,13 +70,19 @@ public class RecorderService extends Service {
 
     private final List<Worker> workers = new ArrayList<>();
     private Thread cleaner;
-    private final android.os.Handler retryHandler = new android.os.Handler();
+    /**
+     * Semua kerja berat (flashdisk, ffmpeg, web server, HTTPS) dijalankan di thread kontrol ini,
+     * BUKAN di thread utama. Thread utama hanya menggambar layar -> aplikasi tidak pernah "Not responding".
+     */
+    private final java.util.concurrent.ScheduledExecutorService ctl =
+            java.util.concurrent.Executors.newSingleThreadScheduledExecutor();
+    private java.util.concurrent.ScheduledFuture<?> retryFuture;
     private final Runnable retryStart = new Runnable() {
         @Override public void run() {
             Config cfg = new Config(RecorderService.this);
             if (!cfg.isEnabled() || running) return;
             startRecording(cfg);
-            if (!running) retryHandler.postDelayed(this, 20_000);
+            if (!running) retryFuture = ctl.schedule(this, 20, java.util.concurrent.TimeUnit.SECONDS);
         }
     };
     private WebServer web;
@@ -131,9 +138,13 @@ public class RecorderService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
-        // TLS modern (1.2/1.3) untuk Android 4.4: dipakai server HTTPS & koneksi ke Let's Encrypt.
-        try { java.security.Security.insertProviderAt(org.conscrypt.Conscrypt.newProvider(), 1); }
-        catch (Throwable t) { Log.w(TAG, "Conscrypt tidak tersedia", t); }
+        Diag.install(this);
+        // TLS modern (1.2/1.3) untuk Android 4.4: dipasang di thread latar (memuat pustaka native).
+        new Thread(() -> {
+            try { java.security.Security.insertProviderAt(org.conscrypt.Conscrypt.newProvider(), 1); }
+            catch (Throwable t) { Log.w(TAG, "Conscrypt tidak tersedia", t); }
+            TLS_READY.countDown();
+        }, "conscrypt").start();
         Notification n = buildNotification("Merekam 24/7");
         if (Build.VERSION.SDK_INT >= 29) {
             startForeground(NOTIF_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);
@@ -155,15 +166,25 @@ public class RecorderService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        final boolean applyNow = intent != null && ACTION_APPLY.equals(intent.getAction());
+        try {
+            ctl.execute(() -> {
+                try { control(applyNow); } catch (Throwable t) { Log.e(TAG, "control", t); Diag.crash(this, t); }
+            });
+        } catch (java.util.concurrent.RejectedExecutionException ignored) { }   // service sedang berhenti
+        return START_STICKY;   // dihidupkan ulang sistem jika ter-kill
+    }
+
+    /** Dijalankan di thread kontrol. */
+    private void control(boolean applyNow) {
         Config cfg = new Config(this);
-        boolean applyNow = intent != null && ACTION_APPLY.equals(intent.getAction());
 
         // --- Rekaman ---
         if (applyNow) { stopRecording(); LiveManager.stopAll(); }   // URL kamera bisa berubah
         if (cfg.isEnabled() && !running) startRecording(cfg);
         // Setelah boot, HDD USB sering baru ter-mount beberapa detik kemudian -> coba lagi tiap 20 dtk.
-        retryHandler.removeCallbacks(retryStart);
-        if (cfg.isEnabled() && !running) retryHandler.postDelayed(retryStart, 20_000);
+        if (retryFuture != null) retryFuture.cancel(false);
+        if (cfg.isEnabled() && !running) retryFuture = ctl.schedule(retryStart, 20, java.util.concurrent.TimeUnit.SECONDS);
         if (!cfg.isEnabled() && running) stopRecording();
 
         // --- Web server ---
@@ -183,10 +204,9 @@ public class RecorderService extends Service {
 
         manageHttps(cfg);
 
-        if (!cfg.isEnabled() && !cfg.isWebEnabled()) { stopSelf(); return START_NOT_STICKY; }
+        if (!cfg.isEnabled() && !cfg.isWebEnabled()) { stopSelf(); return; }
         updateNotification((running ? "Merekam" : "Tidak merekam")
                 + (web != null ? " · web :" + cfg.getWebPort() : ""));
-        return START_STICKY;   // dihidupkan ulang sistem jika ter-kill
     }
 
     // =====================================================================
@@ -223,6 +243,7 @@ public class RecorderService extends Service {
     }
 
     private void certLoop() {
+        try { TLS_READY.await(30, java.util.concurrent.TimeUnit.SECONDS); } catch (InterruptedException e) { return; }
         while (httpsWanted) {
             long wait = 12 * 3600_000L;
             try {
@@ -316,14 +337,20 @@ public class RecorderService extends Service {
 
     @Override
     public void onDestroy() {
-        retryHandler.removeCallbacks(retryStart);
-        LiveManager.stopAll();
-        stopRecording();
-        if (web != null) { web.stop(); web = null; }
         httpsWanted = false;
         synchronized (CERT_LOCK) { CERT_LOCK.notifyAll(); }
-        stopHttpsServer();
-        webInfo = "";
+        // Bersih-bersih di thread kontrol (bisa menyentuh flashdisk), bukan di thread utama.
+        try {
+            ctl.execute(() -> {
+                if (retryFuture != null) retryFuture.cancel(false);
+                LiveManager.stopAll();
+                stopRecording();
+                if (web != null) { web.stop(); web = null; }
+                stopHttpsServer();
+                webInfo = "";
+            });
+        } catch (java.util.concurrent.RejectedExecutionException ignored) { }
+        ctl.shutdown();
         if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
         if (wifiLock != null && wifiLock.isHeld()) wifiLock.release();
         super.onDestroy();
