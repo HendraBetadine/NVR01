@@ -40,11 +40,11 @@ make distclean >/dev/null 2>&1 || true
   --disable-autodetect --disable-everything \
   --enable-network \
   --enable-protocol=tcp,udp,rtp,file,pipe \
-  --enable-demuxer=rtsp,rtp,sdp,matroska \
+  --enable-demuxer=rtsp,rtp,sdp,matroska,mpegts \
   --enable-muxer=segment,matroska,mp4,mov,hls,mpegts,tee \
   --enable-parser=h264,hevc,aac,mjpeg \
   --enable-decoder=h264,hevc,aac,pcm_alaw,pcm_mulaw,mjpeg \
-  --enable-bsf=h264_mp4toannexb,hevc_mp4toannexb,aac_adtstoasc,extract_extradata \
+  --enable-bsf=h264_mp4toannexb,hevc_mp4toannexb,aac_adtstoasc,extract_extradata,dump_extra \
   --enable-filter=null,anull,buffer,buffersink,abuffer,abuffersink,format,aformat,aresample \
   --enable-swresample
 

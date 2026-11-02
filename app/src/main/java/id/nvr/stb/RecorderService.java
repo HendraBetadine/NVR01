@@ -46,6 +46,9 @@ public class RecorderService extends Service {
     /** Status per kamera untuk ditampilkan di layar. */
     public static final Map<String, String> STATUS = Collections.synchronizedMap(new LinkedHashMap<String, String>());
     public static volatile boolean running = false;
+    /** Kamera -> port UDP lokal tempat perekam meneruskan salinan video untuk live view. */
+    public static final Map<String, Integer> RELAY = new java.util.concurrent.ConcurrentHashMap<>();
+    private static final int RELAY_BASE_PORT = 23001;
 
     public static volatile String webInfo = "";
 
@@ -287,9 +290,12 @@ public class RecorderService extends Service {
         httpsActive = false;
     }
 
+    /** Dijalankan di thread kontrol: menunggu ffmpeg benar-benar memutus koneksi kamera (maks 4 dtk). */
     private void stopRecording() {
         running = false;
-        for (Worker w : workers) w.shutdown();
+        List<Process> dying = new ArrayList<>();
+        for (Worker w : workers) { Process p = w.shutdown(); if (p != null) dying.add(p); }
+        for (Process p : dying) Procs.awaitOrKill(p, 4000);
         workers.clear();
         if (cleaner != null) { cleaner.interrupt(); cleaner = null; }
         STATUS.clear();
@@ -320,9 +326,10 @@ public class RecorderService extends Service {
         deleteTree(new File(rootDir, ".playcache"));   // cache playback lama (sekarang playback dialirkan langsung)
 
         running = true;
+        int idx = 0;
         for (Config.Camera c : cams) {
             Worker w = new Worker(c, ffmpeg.getAbsolutePath(), new File(rootDir, c.name),
-                    cfg.getSegmentMinutes(), cfg.getAudio());
+                    cfg.getSegmentMinutes(), cfg.getAudio(), RELAY_BASE_PORT + (idx++));
             workers.add(w);
             w.start();
         }
@@ -369,13 +376,14 @@ public class RecorderService extends Service {
         private final File dir;
         private final int segMinutes;
         private final boolean audio;
+        private final int relayPort;
         private volatile Process proc;
         private volatile boolean stop = false;
 
-        Worker(Config.Camera cam, String ffmpeg, File dir, int segMinutes, boolean audio) {
+        Worker(Config.Camera cam, String ffmpeg, File dir, int segMinutes, boolean audio, int relayPort) {
             super("cam-" + cam.name);
             this.cam = cam; this.ffmpeg = ffmpeg; this.dir = dir;
-            this.segMinutes = segMinutes; this.audio = audio;
+            this.segMinutes = segMinutes; this.audio = audio; this.relayPort = relayPort;
         }
 
         private List<String> buildCmd() {
@@ -392,8 +400,7 @@ public class RecorderService extends Service {
             if (audio) { cmd.add("-map"); cmd.add("0:a:0?"); }
             cmd.add("-c");
             cmd.add("copy");
-            // Rekam saja. Live view memakai proses terpisah (LiveManager) supaya error live
-            // tidak pernah mengganggu rekaman, dan sebaliknya.
+            // Output 1: rekaman MKV per segmen.
             String mkv = new File(dir, cam.name + "_%Y%m%d_%H%M%S.mkv").getAbsolutePath();
             cmd.addAll(Arrays.asList(
                     "-f", "segment",
@@ -403,19 +410,29 @@ public class RecorderService extends Service {
                     "-reset_timestamps", "1",
                     "-strftime", "1",
                     mkv));
+            // Output 2: salinan video ke UDP lokal untuk live view (LiveManager). Jadi kamera cukup
+            // 1 koneksi. UDP ke port yang tidak didengar tidak error, dan tidak menulis ke disk.
+            cmd.addAll(Arrays.asList(
+                    "-map", "0:v:0", "-c", "copy",
+                    "-bsf:v", "dump_extra=freq=keyframe",      // SPS/PPS di tiap keyframe -> penonton bisa gabung kapan saja
+                    "-f", "mpegts", "udp://127.0.0.1:" + relayPort + "?pkt_size=1316"));
             return cmd;
         }
 
-        void shutdown() {
+        /** Minta berhenti (SIGTERM). Return proses ffmpeg supaya pemanggil bisa menunggunya. */
+        Process shutdown() {
             stop = true;
-            Process p = proc;
-            if (p != null) p.destroy();
+            RELAY.remove(cam.name);
+            final Process p = proc;
+            Procs.signalStop(p);
             interrupt();
+            return p;
         }
 
         @Override
         public void run() {
             int fails = 0;
+            RELAY.put(cam.name, relayPort);
             while (!stop) {
                 dir.mkdirs();
                 List<String> cmd = buildCmd();
@@ -435,7 +452,7 @@ public class RecorderService extends Service {
                         long age = System.currentTimeMillis() - newestFileTime(dir);
                         if (System.currentTimeMillis() - started > STALL_MS && age > STALL_MS) {
                             Log.w(TAG, cam.name + ": macet, restart");
-                            proc.destroy();
+                            Procs.terminate(proc, 4000);
                             break;
                         }
                     }
@@ -446,13 +463,34 @@ public class RecorderService extends Service {
                 proc = null;
                 if (stop) break;
 
-                // Jeda sebelum sambung ulang (5 dtk, naik sampai 60 dtk jika gagal terus)
+                // Jeda sebelum sambung ulang: 10, 20, 40, 80, maks 120 dtk jika gagal terus.
+                // Jangan terlalu cepat: kamera seperti Tapo mengunci akses jika dicoba bertubi-tubi.
                 boolean quickFail = System.currentTimeMillis() - started < 30_000;
-                fails = quickFail ? Math.min(fails + 1, 12) : 0;
-                long wait = 5_000L * Math.max(1, fails);
-                STATUS.put(cam.name, "✕ Putus, coba lagi " + (wait / 1000) + " dtk (lihat log)");
+                fails = quickFail ? Math.min(fails + 1, 5) : 0;
+                long wait = Math.min(120_000L, 10_000L << Math.max(0, fails - 1));
+                String why = lastErr;
+                STATUS.put(cam.name, "✕ " + (why != null ? why : "Putus") + " — coba lagi " + (wait / 1000) + " dtk");
                 try { Thread.sleep(wait); } catch (InterruptedException ie) { break; }
             }
+        }
+
+        private volatile String lastErr;
+
+        /** Terjemahkan error ffmpeg yang umum jadi pesan yang jelas. */
+        static String explain(String line) {
+            String l = line.toLowerCase(java.util.Locale.US);
+            if (l.contains("non-monotonic") || l.contains("timestamps")) return null;   // angka DTS, bukan kode error
+            if (l.contains("operation not permitted") || l.contains("403 forbidden") || l.contains("failed: 403"))
+                return "Kamera menolak (403): koneksi kamera penuh / dikunci sementara";
+            if (l.contains("401 unauthorized") || l.contains("failed: 401") || l.contains("permission denied"))
+                return "User/password kamera salah (401)";
+            if (l.contains("404 not found") || l.contains("failed: 404"))
+                return "Alamat stream salah (404)";
+            if (l.contains("connection refused"))
+                return "Port RTSP kamera tertutup";
+            if (l.contains("timed out") || l.contains("no route to host") || l.contains("network is unreachable"))
+                return "Kamera tidak merespons (cek listrik/jaringan kamera)";
+            return null;
         }
 
         /** Simpan output ffmpeg ke <folder kamera>/ffmpeg.log (maks ~256 KB). */
@@ -463,7 +501,10 @@ public class RecorderService extends Service {
                 FileWriter fw = new FileWriter(log, true);
                 fw.write("\n--- start " + new java.util.Date() + " ---\n");
                 String line;
+                lastErr = null;
                 while ((line = r.readLine()) != null) {
+                    String why = explain(line);
+                    if (why != null) lastErr = why;
                     fw.write(line);
                     fw.write('\n');
                     fw.flush();

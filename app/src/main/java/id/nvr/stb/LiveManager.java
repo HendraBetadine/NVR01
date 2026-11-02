@@ -27,7 +27,7 @@ public class LiveManager {
 
     private static class Proc {
         final String cam, url;
-        Process p;
+        Process p, dying;
         long lastAccess, started, nextStart;
         int fails;
         Proc(String cam, String url) { this.cam = cam; this.url = url; }
@@ -79,12 +79,22 @@ public class LiveManager {
         try { pr.p.exitValue(); return false; } catch (IllegalThreadStateException running) { return true; }
     }
 
+    /** Hentikan dengan sopan (SIGTERM). Proses lama diingat supaya start() menunggu sampai benar-benar selesai. */
     private static void kill(Proc pr) {
-        if (pr.p != null) { pr.p.destroy(); pr.p = null; }
+        if (pr.p != null) {
+            final Process d = pr.p;
+            Procs.signalStop(d);
+            pr.dying = d;
+            pr.p = null;
+            new Thread(() -> Procs.awaitOrKill(d, 5000), "live-stop").start();   // jaga-jaga jika tidak mau berhenti
+        }
     }
 
     private static void start(final Proc pr) {
         kill(pr);
+        // Tunggu proses lama selesai (maks 3 dtk) sebelum membersihkan folder -> tidak ada
+        // lagi "failed to rename index.m3u8.tmp" karena dua ffmpeg menulis folder yang sama.
+        if (pr.dying != null) { Procs.awaitOrKill(pr.dying, 3000); pr.dying = null; }
         pr.nextStart = 0;
         pr.started = System.currentTimeMillis();
         File dir = camDir(app, pr.cam);
@@ -95,11 +105,23 @@ public class LiveManager {
         String ffmpeg = new File(app.getApplicationInfo().nativeLibraryDir, "libffmpeg.so").getAbsolutePath();
         List<String> cmd = new ArrayList<>(Arrays.asList(
                 ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "warning",
-                "-rtsp_transport", "tcp",
-                "-timeout", "10000000",
-                "-fflags", "+genpts+discardcorrupt",
-                // Pakai timestamp kamera (bukan jam STB) -> ritme frame rata, gerakan halus.
-                "-i", pr.url,
+                "-fflags", "+genpts+discardcorrupt"));
+        Integer port = RecorderService.RELAY.get(pr.cam);
+        if (port != null) {
+            // Perekaman aktif: ambil salinan dari perekam (UDP lokal) -> kamera tetap 1 koneksi.
+            cmd.addAll(Arrays.asList(
+                    "-analyzeduration", "2000000", "-probesize", "1000000",
+                    "-f", "mpegts",
+                    "-i", "udp://127.0.0.1:" + port
+                            + "?fifo_size=1000000&overrun_nonfatal=1&timeout=6000000&buffer_size=2097152"));
+        } else {
+            // Perekaman mati: ambil langsung dari kamera.
+            cmd.addAll(Arrays.asList(
+                    "-rtsp_transport", "tcp",
+                    "-timeout", "10000000",
+                    "-i", pr.url));
+        }
+        cmd.addAll(Arrays.asList(
                 "-map", "0:v:0", "-an",
                 "-c", "copy",
                 "-f", "hls",
@@ -156,10 +178,10 @@ public class LiveManager {
                     }
                     if (!running) {
                         if (pr.nextStart == 0) {
-                            // Gagal cepat berulang -> jeda makin lama (0, 5, 10 … maks 30 dtk)
+                            // Gagal cepat berulang -> jeda makin lama (0, 10, 20, maks 30 dtk); jangan membanjiri kamera
                             boolean quick = now - pr.started < 20_000;
                             pr.fails = quick ? Math.min(pr.fails + 1, 6) : 0;
-                            pr.nextStart = now + 5_000L * pr.fails;
+                            pr.nextStart = now + Math.min(30_000L, 10_000L * pr.fails);
                         }
                         if (now >= pr.nextStart) start(pr);
                     }
