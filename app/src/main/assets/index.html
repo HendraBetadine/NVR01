@@ -124,7 +124,7 @@
       <span class="mute" style="margin-left:auto" id="lvClock"></span>
     </div>
     <div class="grid" id="grid"></div>
-    <div class="mute" style="margin-top:8px">Klik dua kali kamera untuk memperbesar / kembali ke grid. Live view butuh perekaman aktif (jeda ±4–6 detik).</div>
+    <div class="mute" style="margin-top:8px">Klik dua kali kamera untuk memperbesar / kembali ke grid. Jeda gambar ±4–6 detik; kamera yang ditonton pertama kali butuh ±5 detik untuk menyala.</div>
   </section>
 
   <!-- ================= PLAYBACK ================= -->
@@ -248,6 +248,7 @@
       <h2>Log kamera</h2>
       <div class="bar">
         <select id="logCam"></select>
+        <select id="logType"><option value="rec">Log rekaman</option><option value="live">Log live view</option></select>
         <button id="logRef">⟳ Muat log</button>
       </div>
       <pre id="logText" class="log">Pilih kamera lalu klik "Muat log".</pre>
@@ -329,7 +330,7 @@ async function initLive() {
   renderGrid();
 }
 function stopLive() {
-  lv.players.forEach(p => { clearTimeout(p.retry); if (p.hls) p.hls.destroy(); p.video.removeAttribute('src'); p.video.load(); });
+  lv.players.forEach(p => { clearTimeout(p.retry); clearInterval(p.watch); if (p.hls) p.hls.destroy(); p.video.removeAttribute('src'); p.video.load(); });
   lv.players = [];
 }
 function renderGrid() {
@@ -359,27 +360,36 @@ function renderGrid() {
 }
 function attach(tile, cam) {
   const v = tile.querySelector('video'), msg = tile.querySelector('.msg');
-  const p = { video: v, hls: null, retry: null };
+  const p = { video: v, hls: null, retry: null, watch: null, lastT: -1, lastMove: Date.now() };
   lv.players.push(p);
   const url = '/live/' + encodeURIComponent(cam) + '/index.m3u8';
   const again = text => {
     msg.style.display = 'flex'; msg.textContent = text;
     if (p.hls) { p.hls.destroy(); p.hls = null; }
     clearTimeout(p.retry);
-    p.retry = setTimeout(() => { if (lv.players.includes(p)) start(); }, 5000);
+    p.retry = setTimeout(() => { if (lv.players.includes(p)) start(); }, 3000);
   };
   const start = () => {
+    p.lastMove = Date.now(); p.lastT = -1;
     if (window.Hls && Hls.isSupported()) {
-      p.hls = new Hls({ liveSyncDurationCount: 2, maxBufferLength: 8, backBufferLength: 0, enableWorker: true });
-      p.hls.on(Hls.Events.ERROR, (e, d) => { if (d.fatal) again('Tidak ada sinyal — mencoba lagi…'); });
+      p.hls = new Hls({ liveSyncDurationCount: 2, liveMaxLatencyDurationCount: 6, maxBufferLength: 8,
+                        backBufferLength: 0, enableWorker: true, manifestLoadingTimeOut: 20000,
+                        manifestLoadingMaxRetry: 6, levelLoadingMaxRetry: 6, fragLoadingMaxRetry: 6 });
+      p.hls.on(Hls.Events.ERROR, (e, d) => { if (d.fatal) again('Tidak ada sinyal — menyambung ulang…'); });
       p.hls.loadSource(url); p.hls.attachMedia(v);
     } else if (v.canPlayType('application/vnd.apple.mpegurl')) {
       v.src = url;
     } else { msg.textContent = 'Browser tidak mendukung live view'; return; }
     v.play().catch(() => {});
   };
+  // Penjaga macet: gambar tidak bergerak > 12 dtk -> sambung ulang otomatis.
+  p.watch = setInterval(() => {
+    if (!lv.players.includes(p)) { clearInterval(p.watch); return; }
+    if (v.currentTime !== p.lastT) { p.lastT = v.currentTime; p.lastMove = Date.now(); return; }
+    if (Date.now() - p.lastMove > 12000) { p.lastMove = Date.now(); again('Gambar macet — menyambung ulang…'); }
+  }, 2000);
   v.addEventListener('playing', () => msg.style.display = 'none');
-  v.addEventListener('error', () => again('Tidak ada sinyal — mencoba lagi…'));
+  v.addEventListener('error', () => again('Tidak ada sinyal — menyambung ulang…'));
   start();
 }
 $('#lvLayouts').onclick = e => {
@@ -688,7 +698,7 @@ function fillLogCams() {
 $('#logRef').onclick = async () => {
   const cam = $('#logCam').value; if (!cam) return;
   $('#logText').textContent = 'memuat…';
-  const r = await fetch('/api/log?' + q({cam}));
+  const r = await fetch('/api/log?' + q({cam, type: $('#logType').value}));
   $('#logText').textContent = (await r.text()) || '(log kosong)';
   $('#logText').scrollTop = 1e9;
 };

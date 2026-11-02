@@ -50,7 +50,8 @@ public class LiveActivity extends Activity {
         VideoView video;
         TextView msg;
         String cam;
-        long lastStart;
+        long lastStart, lastMove;
+        int lastPos = -1;
         boolean playing;
         final Runnable retry = new Runnable() { @Override public void run() { start(); } };
 
@@ -59,6 +60,8 @@ public class LiveActivity extends Activity {
             handler.removeCallbacks(retry);
             playing = false;
             lastStart = System.currentTimeMillis();
+            lastMove = lastStart;
+            lastPos = -1;
             msg.setText("Menyambung…");
             msg.setVisibility(View.VISIBLE);
             try {
@@ -164,14 +167,26 @@ public class LiveActivity extends Activity {
         }
     };
 
-    /** Tile yang lama tidak mulai main -> sambung ulang. */
+    /** Tile yang tidak mulai main, atau gambarnya berhenti bergerak -> sambung ulang. */
     private final Runnable watchdog = new Runnable() {
         @Override public void run() {
             long now = System.currentTimeMillis();
             for (Tile t : tiles) {
-                if (t.cam != null && !t.playing && now - t.lastStart > 20_000) t.start();
+                if (t.cam == null) continue;
+                if (!t.playing) {
+                    if (now - t.lastStart > 20_000) t.start();
+                    continue;
+                }
+                int pos = -1;
+                try { pos = t.video.getCurrentPosition(); } catch (Exception ignored) { }
+                if (pos != t.lastPos) { t.lastPos = pos; t.lastMove = now; }
+                else if (now - t.lastMove > 12_000) {
+                    t.msg.setText("Gambar macet — menyambung ulang…");
+                    t.msg.setVisibility(View.VISIBLE);
+                    t.start();
+                }
             }
-            handler.postDelayed(this, 10_000);
+            handler.postDelayed(this, 3_000);
         }
     };
 

@@ -159,7 +159,7 @@ public class RecorderService extends Service {
         boolean applyNow = intent != null && ACTION_APPLY.equals(intent.getAction());
 
         // --- Rekaman ---
-        if (applyNow) stopRecording();
+        if (applyNow) { stopRecording(); LiveManager.stopAll(); }   // URL kamera bisa berubah
         if (cfg.isEnabled() && !running) startRecording(cfg);
         // Setelah boot, HDD USB sering baru ter-mount beberapa detik kemudian -> coba lagi tiap 20 dtk.
         retryHandler.removeCallbacks(retryStart);
@@ -294,10 +294,13 @@ public class RecorderService extends Service {
             return;
         }
 
+        // Bersihkan sisa live lama (versi sebelumnya menyimpan live di flashdisk)
+        deleteTree(new File(rootDir, ".live"));
+
         running = true;
         for (Config.Camera c : cams) {
             Worker w = new Worker(c, ffmpeg.getAbsolutePath(), new File(rootDir, c.name),
-                    new File(new File(rootDir, ".live"), c.name), cfg.getSegmentMinutes(), cfg.getAudio());
+                    cfg.getSegmentMinutes(), cfg.getAudio());
             workers.add(w);
             w.start();
         }
@@ -305,9 +308,16 @@ public class RecorderService extends Service {
         cleaner.start();
     }
 
+    private static void deleteTree(File f) {
+        File[] kids = f.listFiles();
+        if (kids != null) for (File k : kids) deleteTree(k);
+        f.delete();
+    }
+
     @Override
     public void onDestroy() {
         retryHandler.removeCallbacks(retryStart);
+        LiveManager.stopAll();
         stopRecording();
         if (web != null) { web.stop(); web = null; }
         httpsWanted = false;
@@ -329,18 +339,14 @@ public class RecorderService extends Service {
         private final Config.Camera cam;
         private final String ffmpeg;
         private final File dir;
-        private final File liveDir;
         private final int segMinutes;
         private final boolean audio;
         private volatile Process proc;
         private volatile boolean stop = false;
-        // Mode "tee": 1 koneksi RTSP -> file rekaman MKV + stream live HLS.
-        private boolean useTee = true;
-        private boolean triedFallback = false;
 
-        Worker(Config.Camera cam, String ffmpeg, File dir, File liveDir, int segMinutes, boolean audio) {
+        Worker(Config.Camera cam, String ffmpeg, File dir, int segMinutes, boolean audio) {
             super("cam-" + cam.name);
-            this.cam = cam; this.ffmpeg = ffmpeg; this.dir = dir; this.liveDir = liveDir;
+            this.cam = cam; this.ffmpeg = ffmpeg; this.dir = dir;
             this.segMinutes = segMinutes; this.audio = audio;
         }
 
@@ -358,29 +364,17 @@ public class RecorderService extends Service {
             if (audio) { cmd.add("-map"); cmd.add("0:a:0?"); }
             cmd.add("-c");
             cmd.add("copy");
+            // Rekam saja. Live view memakai proses terpisah (LiveManager) supaya error live
+            // tidak pernah mengganggu rekaman, dan sebaliknya.
             String mkv = new File(dir, cam.name + "_%Y%m%d_%H%M%S.mkv").getAbsolutePath();
-            if (useTee) {
-                liveDir.mkdirs();
-                File[] old = liveDir.listFiles();
-                if (old != null) for (File f : old) f.delete();
-                cmd.add("-f");
-                cmd.add("tee");
-                // onfail=abort: kalau penulis rekaman gagal, ffmpeg langsung keluar & disambung ulang
-                cmd.add("[f=segment:onfail=abort:segment_time=" + (segMinutes * 60)
-                        + ":segment_format=matroska:segment_atclocktime=1:reset_timestamps=1:strftime=1]" + mkv
-                        + "|[f=hls:select=v:onfail=ignore:hls_time=2:hls_list_size=4"
-                        + ":hls_flags=delete_segments+temp_file]"
-                        + new File(liveDir, "index.m3u8").getAbsolutePath());
-            } else {
-                cmd.addAll(Arrays.asList(
-                        "-f", "segment",
-                        "-segment_time", String.valueOf(segMinutes * 60),
-                        "-segment_format", "matroska",
-                        "-segment_atclocktime", "1",
-                        "-reset_timestamps", "1",
-                        "-strftime", "1",
-                        mkv));
-            }
+            cmd.addAll(Arrays.asList(
+                    "-f", "segment",
+                    "-segment_time", String.valueOf(segMinutes * 60),
+                    "-segment_format", "matroska",
+                    "-segment_atclocktime", "1",
+                    "-reset_timestamps", "1",
+                    "-strftime", "1",
+                    mkv));
             return cmd;
         }
 
@@ -405,7 +399,7 @@ public class RecorderService extends Service {
                     proc = p;
                     Thread logger = new Thread(() -> drainLog(p), "log-" + cam.name);
                     logger.start();
-                    STATUS.put(cam.name, useTee ? "● Merekam" : "● Merekam (tanpa live)");
+                    STATUS.put(cam.name, "● Merekam");
 
                     // Watchdog: kalau file terbaru tidak bertambah, matikan ffmpeg.
                     while (!stop) {
@@ -427,12 +421,6 @@ public class RecorderService extends Service {
                 // Jeda sebelum sambung ulang (5 dtk, naik sampai 60 dtk jika gagal terus)
                 boolean quickFail = System.currentTimeMillis() - started < 30_000;
                 fails = quickFail ? Math.min(fails + 1, 12) : 0;
-                // Pengaman: kalau mode live (tee) cepat gagal, coba mode rekam saja.
-                // Kalau mode rekam saja juga gagal, masalahnya di kamera -> kembali ke mode live.
-                if (quickFail) {
-                    if (useTee) { useTee = false; triedFallback = true; }
-                    else if (triedFallback) { useTee = true; triedFallback = false; }
-                }
                 long wait = 5_000L * Math.max(1, fails);
                 STATUS.put(cam.name, "✕ Putus, coba lagi " + (wait / 1000) + " dtk (lihat log)");
                 try { Thread.sleep(wait); } catch (InterruptedException ie) { break; }

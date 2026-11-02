@@ -83,7 +83,7 @@ public class WebServer {
         }
         server.setReuseAddress(true);
         server.bind(new InetSocketAddress(port));
-        pool = Executors.newFixedThreadPool(8);
+        pool = Executors.newFixedThreadPool(16);
         running = true;
         Thread t = new Thread(new Runnable() {
             @Override public void run() { acceptLoop(); }
@@ -311,16 +311,23 @@ public class WebServer {
         send(r, 200, type, bos.toByteArray(), extra);
     }
 
-    // ---- Live view (HLS yang ditulis ffmpeg perekam ke <folder rekaman>/.live/<kamera>/) ----
+    // ---- Live view on-demand (LiveManager menyalakan ffmpeg live saat stream diminta) ----
     private void live(Req r) throws IOException {
         String[] seg = r.path.split("/");          // "", "live", cam, file
-        File root = recRoot();
-        if (seg.length != 4 || root == null) { json(r, 404, "{\"error\":\"tidak ada\"}"); return; }
+        if (seg.length != 4) { json(r, 404, "{\"error\":\"tidak ada\"}"); return; }
         String cam = new File(seg[2]).getName(), file = new File(seg[3]).getName();
         if (cam.startsWith(".") || !(file.endsWith(".m3u8") || file.endsWith(".ts"))) {
             json(r, 404, "{\"error\":\"tidak ada\"}"); return;
         }
-        File f = new File(new File(new File(root, ".live"), cam), file);
+        if (!LiveManager.touch(ctx, cam)) { json(r, 404, "{\"error\":\"kamera tidak ada\"}"); return; }
+        File f = new File(LiveManager.camDir(ctx, cam), file);
+        // Saat baru menyala, tunggu playlist pertama (maks 12 dtk) supaya player tidak langsung error.
+        if (file.endsWith(".m3u8")) {
+            for (int i = 0; i < 24 && !f.isFile(); i++) {
+                try { Thread.sleep(500); } catch (InterruptedException e) { break; }
+                LiveManager.touch(ctx, cam);
+            }
+        }
         if (!f.isFile()) { json(r, 404, "{\"error\":\"live belum tersedia\"}"); return; }
         byte[] body;
         RandomAccessFile raf = new RandomAccessFile(f, "r");
@@ -337,11 +344,9 @@ public class WebServer {
     /** Kamera dari pengaturan + apakah stream live-nya sedang tersedia. */
     private void liveCams(Req r) throws IOException {
         Config c = new Config(ctx);
-        File root = recRoot();
         StringBuilder sb = new StringBuilder("[");
         for (Config.Camera cam : c.getCameras()) {
-            File m3u8 = root == null ? null : new File(new File(new File(root, ".live"), cam.name), "index.m3u8");
-            boolean on = m3u8 != null && m3u8.isFile() && System.currentTimeMillis() - m3u8.lastModified() < 20_000;
+            boolean on = LiveManager.isStreaming(ctx, cam.name);
             String st = RecorderService.STATUS.get(cam.name);
             if (sb.length() > 1) sb.append(',');
             sb.append("{\"name\":").append(js(cam.name))
@@ -694,8 +699,14 @@ public class WebServer {
 
     /** 64 KB terakhir dari ffmpeg.log kamera (untuk diagnosa). */
     private void camLog(Req r) throws IOException {
-        File dir = camDir(r.q("cam"));
-        File f = dir == null ? null : new File(dir, "ffmpeg.log");
+        File f;
+        if ("live".equals(r.q("type"))) {
+            String cam = new File(r.q("cam")).getName();
+            f = cam.isEmpty() || cam.startsWith(".") ? null : new File(LiveManager.root(ctx), cam + ".log");
+        } else {
+            File dir = camDir(r.q("cam"));
+            f = dir == null ? null : new File(dir, "ffmpeg.log");
+        }
         if (f == null || !f.isFile()) {
             send(r, 200, "text/plain; charset=utf-8", "(belum ada log untuk kamera ini)".getBytes("UTF-8"), null);
             return;
