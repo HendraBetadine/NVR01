@@ -117,11 +117,28 @@ public class Storage {
         return path.startsWith(internal) || path.startsWith("/storage/emulated") || path.startsWith("/sdcard");
     }
 
-    /** Folder akar yang boleh dibuka lewat web (label -> folder). */
-    public static Map<String, File> webRoots(Context ctx) {
+    private static Map<String, File> rootsCache;
+    private static long rootsCacheAt;
+    private static String rootsCacheRec = "";
+
+    /**
+     * Folder akar yang boleh dibuka lewat web (label -> folder).
+     * Di-cache 30 dtk: setiap request web memakai daftar ini, dan memindai disk (uji tulis ke
+     * flashdisk) di setiap klik membuat menu File sangat lambat.
+     */
+    public static synchronized Map<String, File> webRoots(Context ctx) {
+        String rec = new Config(ctx).getStoragePath();
+        long now = System.currentTimeMillis();
+        if (rootsCache != null && now - rootsCacheAt < 30_000 && rec.equals(rootsCacheRec)) return rootsCache;
+        rootsCache = scanWebRoots(ctx, rec);
+        rootsCacheAt = now;
+        rootsCacheRec = rec;
+        return rootsCache;
+    }
+
+    private static Map<String, File> scanWebRoots(Context ctx, String rec) {
         Map<String, File> roots = new LinkedHashMap<>();
         Set<String> seen = new LinkedHashSet<>();
-        String rec = new Config(ctx).getStoragePath();
         if (!rec.isEmpty()) add(roots, seen, "Rekaman", new File(rec));
         add(roots, seen, "Internal", Environment.getExternalStorageDirectory());
         for (Mount m : mounts(ctx)) {

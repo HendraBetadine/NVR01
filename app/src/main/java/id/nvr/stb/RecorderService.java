@@ -317,6 +317,7 @@ public class RecorderService extends Service {
 
         // Bersihkan sisa live lama (versi sebelumnya menyimpan live di flashdisk)
         deleteTree(new File(rootDir, ".live"));
+        deleteTree(new File(rootDir, ".playcache"));   // cache playback lama (sekarang playback dialirkan langsung)
 
         running = true;
         for (Config.Camera c : cams) {
@@ -481,13 +482,17 @@ public class RecorderService extends Service {
         }
     }
 
+    /**
+     * Waktu ubah file rekaman terbaru. Nama file berisi tanggal-jam (cam_YYYYMMDD_HHMMSS.mkv), jadi
+     * file terbaru = nama terbesar; cukup 1 kali baca info file, bukan ribuan (flashdisk lambat).
+     */
     private static long newestFileTime(File dir) {
-        long newest = 0;
-        File[] files = dir.listFiles();
-        if (files != null) for (File f : files) {
-            if (f.getName().endsWith(".mkv")) newest = Math.max(newest, f.lastModified());
+        String[] names = dir.list();
+        String newest = null;
+        if (names != null) for (String n : names) {
+            if (n.endsWith(".mkv") && (newest == null || n.compareTo(newest) > 0)) newest = n;
         }
-        return newest;
+        return newest == null ? 0 : new File(dir, newest).lastModified();
     }
 
     // =====================================================================

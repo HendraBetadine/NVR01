@@ -98,7 +98,7 @@ public class LiveManager {
                 "-rtsp_transport", "tcp",
                 "-timeout", "10000000",
                 "-fflags", "+genpts+discardcorrupt",
-                "-use_wallclock_as_timestamps", "1",
+                // Pakai timestamp kamera (bukan jam STB) -> ritme frame rata, gerakan halus.
                 "-i", pr.url,
                 "-map", "0:v:0", "-an",
                 "-c", "copy",

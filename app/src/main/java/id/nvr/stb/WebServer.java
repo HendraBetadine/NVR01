@@ -83,7 +83,7 @@ public class WebServer {
         }
         server.setReuseAddress(true);
         server.bind(new InetSocketAddress(port));
-        pool = Executors.newFixedThreadPool(16);
+        pool = Executors.newFixedThreadPool(32);   // keep-alive menahan thread selama koneksi terbuka
         running = true;
         Thread t = new Thread(new Runnable() {
             @Override public void run() { acceptLoop(); }
@@ -119,27 +119,85 @@ public class WebServer {
         String method, path;
         final Map<String, String> query = new HashMap<>();
         final Map<String, String> headers = new HashMap<>();
-        InputStream in;
+        InputStream in;            // isi (body) request ini saja
         OutputStream out;
+        boolean keepAlive;         // koneksi dipakai ulang untuk request berikutnya
         String q(String k) { String v = query.get(k); return v == null ? "" : v; }
     }
 
+    /** Membatasi pembacaan ke panjang body request (Content-Length), supaya koneksi bisa dipakai ulang. */
+    private static class BodyStream extends InputStream {
+        private final InputStream in;
+        long left;
+        BodyStream(InputStream in, long len) { this.in = in; this.left = len; }
+        @Override public int read() throws IOException {
+            if (left <= 0) return -1;
+            int c = in.read();
+            if (c >= 0) left--;
+            return c;
+        }
+        @Override public int read(byte[] b, int off, int len) throws IOException {
+            if (left <= 0) return -1;
+            int n = in.read(b, off, (int) Math.min(len, left));
+            if (n > 0) left -= n;
+            return n;
+        }
+        /** Buang sisa body yang tidak dibaca handler. False jika terlalu besar (tutup koneksi saja). */
+        boolean drain() throws IOException {
+            if (left > 1024 * 1024) return false;
+            byte[] b = new byte[8192];
+            while (left > 0) if (read(b, 0, b.length) < 0) return false;
+            return true;
+        }
+    }
+
+    /**
+     * Satu koneksi bisa melayani banyak request (HTTP keep-alive). Penting untuk HTTPS:
+     * tanpa ini, setiap potongan video live = handshake TLS baru yang berat untuk CPU STB.
+     */
     private void handle(Socket sock) {
         try {
-            Req r = new Req();
-            r.in = new BufferedInputStream(sock.getInputStream(), BUF);
-            r.out = new BufferedOutputStream(sock.getOutputStream(), BUF);
+            InputStream raw = new BufferedInputStream(sock.getInputStream(), BUF);
+            OutputStream out = new BufferedOutputStream(sock.getOutputStream(), BUF);
+            sock.setSoTimeout(30_000);
+            for (int n = 0; n < 1000; n++) {
+                Req r = new Req();
+                r.out = out;
+                if (!handleOne(sock, raw, r)) break;
+                out.flush();
+                if (!r.keepAlive || !((BodyStream) r.in).drain()) break;
+            }
+        } catch (java.net.SocketTimeoutException idle) {
+            // klien diam -> tutup koneksi
+        } catch (Exception e) {
+            Log.w(TAG, "request", e);
+        } finally {
+            try { sock.close(); } catch (IOException ignored) { }
+        }
+    }
 
-            String line = readLine(r.in);
-            if (line == null) return;
+    /** Baca & layani satu request. Return false jika koneksi sudah ditutup klien. */
+    private boolean handleOne(Socket sock, InputStream raw, Req r) throws IOException {
+        {
+            String line = readLine(raw);
+            if (line == null) return false;
+            if (line.isEmpty()) line = readLine(raw);          // CRLF sisa request sebelumnya
+            if (line == null) return false;
             String[] parts = line.split(" ");
-            if (parts.length < 2) return;
+            if (parts.length < 2) return false;
             r.method = parts[0].toUpperCase(Locale.US);
             String target = parts[1];
-            while ((line = readLine(r.in)) != null && !line.isEmpty()) {
+            String version = parts.length > 2 ? parts[2] : "HTTP/1.0";
+            while ((line = readLine(raw)) != null && !line.isEmpty()) {
                 int c = line.indexOf(':');
                 if (c > 0) r.headers.put(line.substring(0, c).trim().toLowerCase(Locale.US), line.substring(c + 1).trim());
             }
+            String conn = r.headers.get("connection");
+            r.keepAlive = version.equals("HTTP/1.1") ? !"close".equalsIgnoreCase(conn) : "keep-alive".equalsIgnoreCase(conn);
+            long len = 0;
+            try { len = Long.parseLong(r.headers.get("content-length")); } catch (Exception ignored) { }
+            if (r.headers.containsKey("transfer-encoding")) r.keepAlive = false;   // chunked tidak didukung
+            r.in = new BodyStream(raw, Math.max(0, len));
             int qm = target.indexOf('?');
             r.path = decode(qm >= 0 ? target.substring(0, qm) : target);
             if (qm >= 0) {
@@ -154,7 +212,7 @@ public class WebServer {
             if (r.path.startsWith("/.well-known/acme-challenge/")) {
                 String ka = Acme.CHALLENGES.get(r.path.substring("/.well-known/acme-challenge/".length()));
                 send(r, ka == null ? 404 : 200, "text/plain", (ka == null ? "" : ka).getBytes("UTF-8"), null);
-                return;
+                return true;
             }
 
             // Live view di layar TV STB mengakses lewat 127.0.0.1 -> tidak perlu password.
@@ -166,35 +224,35 @@ public class WebServer {
                 String dom = RecorderService.httpsDomain;
                 if (ssl == null && RecorderService.httpsActive && !dom.isEmpty() && !isLan(client)) {
                     send(r, 301, "text/plain", new byte[0], "Location: https://" + dom + target + "\r\n");
-                    return;
+                    return true;
                 }
                 if (isBlocked(client)) {
                     send(r, 429, "text/plain; charset=utf-8",
                             "Terlalu banyak percobaan password salah. Coba lagi 15 menit lagi.".getBytes("UTF-8"), null);
-                    return;
+                    return true;
                 }
                 // Akses dari internet (lewat reverse proxy / IP publik) ditolak selama password masih lemah.
                 if (!isLan(client) && weakPassword()) {
                     send(r, 403, "text/plain; charset=utf-8",
                             ("Akses dari internet ditolak: password web masih lemah (default/kosong/kurang dari 8 karakter).\n"
                             + "Ganti password di Pengaturan (dari jaringan lokal) dulu.").getBytes("UTF-8"), null);
-                    return;
+                    return true;
                 }
                 if (!authorized(r)) {
                     if (r.headers.containsKey("authorization")) recordFail(client);
                     send(r, 401, "text/plain; charset=utf-8", "Butuh password".getBytes("UTF-8"),
                             "WWW-Authenticate: Basic realm=\"STB NVR\"\r\n");
-                    return;
+                    return true;
                 }
                 clearFails(client);
             }
             route(r);
-            r.out.flush();
-        } catch (Exception e) {
-            Log.w(TAG, "request", e);
-        } finally {
-            try { sock.close(); } catch (IOException ignored) { }
+            return true;
         }
+    }
+
+    private static String connHeader(Req r) {
+        return r.keepAlive ? "Connection: keep-alive\r\nKeep-Alive: timeout=30\r\n" : "Connection: close\r\n";
     }
 
     // ---- Pengaman akses dari internet ----
@@ -399,8 +457,35 @@ public class WebServer {
         json(r, 200, sb.append("]}").toString());
     }
 
+    /** Beban CPU (load average 1 menit) dan RAM tersedia, dibaca dari /proc. */
+    private static String sysInfo() {
+        String load = "?";
+        long availKb = -1, totalKb = -1, freeKb = 0, cachedKb = 0;
+        try {
+            java.io.BufferedReader br = new java.io.BufferedReader(new java.io.FileReader("/proc/loadavg"));
+            load = br.readLine().split(" ")[0];
+            br.close();
+            br = new java.io.BufferedReader(new java.io.FileReader("/proc/meminfo"));
+            String l;
+            while ((l = br.readLine()) != null) {
+                String[] p = l.split("\\s+");
+                if (p.length < 2) continue;
+                long v = Long.parseLong(p[1]);
+                if (l.startsWith("MemTotal:")) totalKb = v;
+                else if (l.startsWith("MemAvailable:")) availKb = v;
+                else if (l.startsWith("MemFree:")) freeKb = v;
+                else if (l.startsWith("Cached:")) cachedKb = v;
+            }
+            br.close();
+        } catch (Exception ignored) { }
+        if (availKb < 0) availKb = freeKb + cachedKb;   // kernel lama tidak punya MemAvailable
+        return "\"load\":" + js(load) + ",\"cpus\":" + Runtime.getRuntime().availableProcessors()
+                + ",\"memFreeMb\":" + (availKb / 1024) + ",\"memTotalMb\":" + (totalKb / 1024);
+    }
+
     private void apiStatus(Req r) throws IOException {
-        StringBuilder sb = new StringBuilder("{\"recording\":").append(RecorderService.running).append(",\"cams\":[");
+        StringBuilder sb = new StringBuilder("{").append(sysInfo())
+                .append(",\"recording\":").append(RecorderService.running).append(",\"cams\":[");
         synchronized (RecorderService.STATUS) {
             boolean first = true;
             for (Map.Entry<String, String> e : RecorderService.STATUS.entrySet()) {
@@ -450,7 +535,7 @@ public class WebServer {
         if (!inline) {
             h.append("Content-Disposition: attachment; filename=\"").append(f.getName().replace("\"", "")).append("\"\r\n");
         }
-        h.append("Connection: close\r\n\r\n");
+        h.append(connHeader(r)).append("\r\n");
         r.out.write(h.toString().getBytes("UTF-8"));
         if (r.method.equals("HEAD") || count == 0) return;
 
@@ -825,7 +910,6 @@ public class WebServer {
     //  Playback rekaman
     // =====================================================================
     private static final Pattern REC = Pattern.compile("^(.+)_(\\d{8})_(\\d{6})\\.mkv$");
-    private static final Object PLAY_LOCK = new Object();
 
     private File recRoot() {
         String p = new Config(ctx).getStoragePath();
@@ -898,9 +982,13 @@ public class WebServer {
         json(r, 200, sb.append("]}").toString());
     }
 
+    /** Maks 2 playback bersamaan supaya CPU & flashdisk STB tidak kewalahan. */
+    private static final java.util.concurrent.Semaphore PLAYS = new java.util.concurrent.Semaphore(2);
+
     /**
-     * Putar 1 file rekaman di browser. MKV di-remux (tanpa encode ulang) ke MP4 "faststart",
-     * disimpan di cache supaya bisa di-seek, lalu dikirim dengan dukungan Range.
+     * Putar rekaman di browser: MKV dialirkan LANGSUNG sebagai MP4 terfragmentasi (tanpa encode ulang,
+     * tanpa menunggu konversi seluruh file). Lompat waktu lewat parameter ss (detik dari awal file),
+     * dikerjakan ffmpeg di STB -> mulai putar ±1 detik.
      */
     private void play(Req r) throws IOException {
         File dir = camDir(r.q("cam"));
@@ -908,79 +996,39 @@ public class WebServer {
         if (dir == null || !REC.matcher(name).matches()) { json(r, 404, "{\"error\":\"file tidak ada\"}"); return; }
         File src = new File(dir, name);
         if (!src.isFile()) { json(r, 404, "{\"error\":\"file tidak ada\"}"); return; }
+        int ss = 0;
+        try { ss = Math.max(0, Integer.parseInt(r.q("ss"))); } catch (Exception ignored) { }
 
-        File cacheDir = new File(recRoot(), ".playcache");
-        cacheDir.mkdirs();
-        File mp4 = new File(cacheDir, dir.getName() + "__" + name.replace(".mkv", ".mp4"));
-        boolean audio = "1".equals(r.q("audio"));
-        if (audio) mp4 = new File(cacheDir, mp4.getName().replace(".mp4", "_a.mp4"));
-
-        synchronized (PLAY_LOCK) {   // 1 konversi sekaligus supaya CPU STB tidak kewalahan
-            // File yang masih direkam terus bertambah: cache dipakai ulang 60 dtk supaya seek tidak memicu remux ulang.
-            boolean stale = mp4.lastModified() < src.lastModified()
-                    && System.currentTimeMillis() - mp4.lastModified() > 60_000;
-            if (!mp4.isFile() || stale) {
-                if (!remux(src, mp4, audio)) {
-                    json(r, 500, "{\"error\":\"gagal menyiapkan video (lihat file ffmpeg.log di folder .playcache)\"}");
-                    return;
-                }
-                pruneCache(cacheDir, mp4);
-            }
-        }
-        serveFile(r, mp4, true);
-    }
-
-    private boolean remux(File src, File out, boolean audio) {
-        File ffmpeg = new File(ctx.getApplicationInfo().nativeLibraryDir, "libffmpeg.so");
-        File tmp = new File(out.getParentFile(), "tmp_" + out.getName());
-        List<String> cmd = new ArrayList<>(Arrays.asList(
-                ffmpeg.getAbsolutePath(), "-nostdin", "-y", "-hide_banner", "-loglevel", "error",
-                "-i", src.getAbsolutePath(), "-map", "0:v:0"));
-        if (audio) { cmd.add("-map"); cmd.add("0:a:0?"); }
-        else cmd.add("-an");
-        cmd.addAll(Arrays.asList("-c", "copy", "-movflags", "+faststart", "-f", "mp4", tmp.getAbsolutePath()));
+        if (!PLAYS.tryAcquire()) { json(r, 503, "{\"error\":\"Terlalu banyak playback bersamaan\"}"); return; }
+        Process p = null;
         try {
-            final Process p = new ProcessBuilder(cmd).redirectErrorStream(true).start();
-            final File log = new File(out.getParentFile(), "ffmpeg.log");
-            new Thread(new Runnable() {      // simpan pesan error ffmpeg (API 19 belum punya redirectOutput)
-                @Override public void run() {
-                    try {
-                        InputStream is = p.getInputStream();
-                        FileOutputStream fo = new FileOutputStream(log);
-                        byte[] b = new byte[4096];
-                        int n;
-                        while ((n = is.read(b)) > 0) fo.write(b, 0, n);
-                        fo.close();
-                    } catch (Exception ignored) { }
-                }
-            }, "remux-log").start();
-            long deadline = System.currentTimeMillis() + 5 * 60_000;
-            while (true) {
-                try { int code = p.exitValue();
-                      if (code == 0 && tmp.length() > 0) { out.delete(); return tmp.renameTo(out); }
-                      tmp.delete(); return false; }
-                catch (IllegalThreadStateException running) {
-                    if (System.currentTimeMillis() > deadline) { p.destroy(); tmp.delete(); return false; }
-                    Thread.sleep(300);
-                }
-            }
-        } catch (Exception e) {
-            Log.w(TAG, "remux", e);
-            tmp.delete();
-            return false;
-        }
-    }
+            File ffmpeg = new File(ctx.getApplicationInfo().nativeLibraryDir, "libffmpeg.so");
+            List<String> cmd = new ArrayList<>(Arrays.asList(
+                    ffmpeg.getAbsolutePath(), "-nostdin", "-hide_banner", "-loglevel", "error"));
+            if (ss > 0) { cmd.add("-ss"); cmd.add(String.valueOf(ss)); }   // lompat ke keyframe terdekat (cepat)
+            cmd.addAll(Arrays.asList("-i", src.getAbsolutePath(), "-map", "0:v:0", "-an", "-c", "copy",
+                    "-movflags", "frag_keyframe+empty_moov+default_base_moof", "-f", "mp4", "pipe:1"));
+            p = new ProcessBuilder(cmd).start();
+            final Process proc = p;
+            new Thread(() -> {               // buang stderr supaya ffmpeg tidak tertahan
+                try { InputStream e = proc.getErrorStream(); byte[] b = new byte[4096]; while (e.read(b) > 0) { } }
+                catch (Exception ignored) { }
+            }, "play-err").start();
 
-    /** Simpan maksimal 6 video di cache, hapus yang lama. */
-    private static void pruneCache(File cacheDir, File keep) {
-        File[] fs = cacheDir.listFiles();
-        if (fs == null) return;
-        List<File> mp4s = new ArrayList<>();
-        for (File f : fs) if (f.getName().endsWith(".mp4") && !f.equals(keep)) mp4s.add(f);
-        Collections.sort(mp4s, new Comparator<File>() {
-            @Override public int compare(File a, File b) { return Long.compare(b.lastModified(), a.lastModified()); }
-        });
-        for (int i = 5; i < mp4s.size(); i++) mp4s.get(i).delete();
+            r.keepAlive = false;             // panjang tidak diketahui -> akhir data = koneksi ditutup
+            r.out.write(("HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\nCache-Control: no-store\r\n"
+                    + "Connection: close\r\n\r\n").getBytes("UTF-8"));
+            InputStream in = p.getInputStream();
+            byte[] buf = new byte[BUF];
+            int n;
+            while ((n = in.read(buf)) > 0) r.out.write(buf, 0, n);
+            r.out.flush();
+        } catch (IOException e) {
+            // penonton menutup / pindah video -> berhenti
+        } finally {
+            if (p != null) p.destroy();
+            PLAYS.release();
+        }
     }
 
     private File camDir(String cam) {
@@ -992,12 +1040,12 @@ public class WebServer {
         return d.isDirectory() ? d : null;
     }
 
+    /** File rekaman terbaru = nama terbesar (nama berisi tanggal-jam), tanpa membaca info tiap file. */
     private static String newestRec(File dir) {
         String newest = null;
-        long t = 0;
-        File[] fs = dir.listFiles();
-        if (fs != null) for (File f : fs) {
-            if (REC.matcher(f.getName()).matches() && f.lastModified() > t) { t = f.lastModified(); newest = f.getName(); }
+        String[] names = dir.list();
+        if (names != null) for (String n : names) {
+            if (REC.matcher(n).matches() && (newest == null || n.substring(n.length() - 19).compareTo(newest.substring(newest.length() - 19)) > 0)) newest = n;
         }
         return newest;
     }
@@ -1085,6 +1133,7 @@ public class WebServer {
             case 411: status = "Length Required"; break;
             case 416: status = "Range Not Satisfiable"; break;
             case 429: status = "Too Many Requests"; break;
+            case 503: status = "Service Unavailable"; break;
             case 507: status = "Insufficient Storage"; break;
             default: status = "Error";
         }
@@ -1092,7 +1141,7 @@ public class WebServer {
                 + "Content-Type: " + type + "\r\n"
                 + "Content-Length: " + body.length + "\r\n"
                 + (extra == null ? "" : extra)
-                + "Connection: close\r\n\r\n";
+                + connHeader(r) + "\r\n";
         r.out.write(h.getBytes("UTF-8"));
         if (!"HEAD".equals(r.method)) r.out.write(body);
         r.out.flush();
